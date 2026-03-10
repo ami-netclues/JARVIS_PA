@@ -1,6 +1,7 @@
 import streamlit as st
 import speech_recognition as sr
 import requests
+from simple_tts import text_to_voice
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -93,7 +94,7 @@ if "pending_user_text" not in st.session_state:
     st.session_state.pending_user_text = ""
 
 # ── n8n Webhook ───────────────────────────────────────────────────────────────
-N8N_WEBHOOK_URL = "https://amibhavsar.app.n8n.cloud/webhook/2a842b2d-2345-4fc1-a399-1838ac2c1da8"
+N8N_WEBHOOK_URL = "https://v1netclues.app.n8n.cloud/webhook/2a842b2d-2345-4fc1-a399-1838ac2c1da8"
 
 def bot_reply(user_text: str) -> str:
     """Send message to n8n webhook and return the bot reply."""
@@ -216,16 +217,32 @@ with chat_container:
             reply = bot_reply(pending)
             # Clear thinking bubble and save real reply
             thinking_slot.empty()
+            
+            # Display immediately before speaking
+            st.markdown(
+                f"<div class='chat-wrapper'>"
+                f"<div><span class='role-label'>JARVIS</span></div>"
+                f"<div class='bot-bubble'>{reply}</div></div>",
+                unsafe_allow_html=True,
+            )
+            
             st.session_state.messages.append({"role": "assistant", "content": reply})
             st.session_state.pending_user_text = ""
+            
+            # Speak the text
+            try:
+                text_to_voice(reply)
+            except Exception as e:
+                print(f"TTS Error: {e}")
+                
             st.rerun()
 
 # ── Status messages ───────────────────────────────────────────────────────────
 if st.session_state.mic_error:
     st.error(st.session_state.mic_error)
     st.session_state.mic_error = ""
-if st.session_state.mic_text:
-    st.success(f"🎤 Heard: **{st.session_state.mic_text}**")
+# if st.session_state.mic_text:
+#     st.success(f"🎤 Heard: **{st.session_state.mic_text}**")
 
 # ── Input row (form so Enter key submits) ────────────────────────────────────
 with st.form(key="chat_form", clear_on_submit=True):
@@ -259,8 +276,8 @@ if mic_clicked:
         spoken, err = listen_from_mic()
     if err:
         st.session_state.mic_error = err
-    else:
-        st.session_state.mic_text = spoken
+    elif spoken:
+        send_message(spoken)
     st.rerun()
 
 if clear_clicked:
