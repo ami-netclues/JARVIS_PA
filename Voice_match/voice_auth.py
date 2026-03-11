@@ -136,8 +136,9 @@ def _load_and_trim_speech(wav_path: Path) -> tuple[np.ndarray, int]:
         if chunks:
             signal = np.concatenate(chunks)
 
-    if signal.size < int(sample_rate * 0.6):
-        raise ValueError("Audio too short for reliable voice match (need ~0.6s+ of speech)")
+    # Accept any utterance >= 0.15 s so single words like "yes" / "hello" pass.
+    if signal.size < int(sample_rate * 0.15):
+        raise ValueError("Audio too short for voice match (need ~0.15s+ of speech)")
 
     return signal.astype(np.float32, copy=False), sample_rate
 
@@ -170,6 +171,11 @@ def build_mfcc_sequence(wav_path: Path) -> np.ndarray:
     return feat
 
 
+# Resemblyzer needs ~1.6 s of speech to produce a stable embedding.
+# Shorter clips (single words like "hello") are tiled to reach this minimum.
+_RESEMBLYZER_MIN_SAMPLES = int(16000 * 1.6)  # 1.6 s at 16 kHz
+
+
 def _build_embedding_resemblyzer(wav_path: Path) -> np.ndarray:
     global _VOICE_ENCODER
     if _VOICE_ENCODER is None:
@@ -178,6 +184,11 @@ def _build_embedding_resemblyzer(wav_path: Path) -> np.ndarray:
     wav = preprocess_wav(wav_path)  # includes VAD + resample
     if wav is None or len(wav) == 0:
         raise ValueError("Empty audio after preprocessing")
+
+    # Tile short audio so the encoder sees enough context.
+    if len(wav) < _RESEMBLYZER_MIN_SAMPLES and len(wav) > 0:
+        repeats = -(-_RESEMBLYZER_MIN_SAMPLES // len(wav))  # ceiling division
+        wav = np.tile(wav, repeats)[:_RESEMBLYZER_MIN_SAMPLES]
 
     emb = _VOICE_ENCODER.embed_utterance(wav).astype(np.float32)
     return _l2_normalize(emb)
@@ -273,14 +284,39 @@ def build_speaker_embedding(wav_path: Path) -> np.ndarray:
     return _build_embedding_fallback(wav_path)
 
 
-def capture_speech_and_embedding(timeout_seconds: int = 5, phrase_seconds: int = 5) -> CaptureResult:
+def is_voice_detected(timeout_seconds: float = 0.5) -> bool:
+    """
+    Lightweight voice-activity check. Returns True if mic picks up speech
+    above ambient noise within timeout_seconds. Does NOT run STT.
+    """
     recognizer = sr.Recognizer()
-    recognizer.pause_threshold = 0.8
+    try:
+        with sr.Microphone() as source:
+            # Longer calibration so ambient hiss is properly baselined
+            recognizer.adjust_for_ambient_noise(source, duration=0.3)
+            # Raise threshold 40 % above ambient to reduce false triggers
+            recognizer.energy_threshold *= 1.4
+            recognizer.listen(source, timeout=timeout_seconds, phrase_time_limit=0.8)
+        return True  # got audio above energy threshold → voice present
+    except sr.WaitTimeoutError:
+        return False
+    except Exception:
+        return False
+
+
+def capture_speech_and_embedding(timeout_seconds: int = 5, phrase_seconds: int | None = None) -> CaptureResult:
+    recognizer = sr.Recognizer()
+    # 1.6 s of silence = end of sentence; prevents cutting mid-sentence on short pauses
+    recognizer.pause_threshold = 1.6
+    recognizer.non_speaking_duration = 0.6
 
     try:
         with sr.Microphone() as source:
             recognizer.adjust_for_ambient_noise(source, duration=0.4)
-            audio = recognizer.listen(source, timeout=timeout_seconds, phrase_time_limit=phrase_seconds)
+            if phrase_seconds is None:
+                audio = recognizer.listen(source, timeout=timeout_seconds)
+            else:
+                audio = recognizer.listen(source, timeout=timeout_seconds, phrase_time_limit=phrase_seconds)
 
         spoken_text = recognizer.recognize_google(audio)
 
@@ -289,12 +325,25 @@ def capture_speech_and_embedding(timeout_seconds: int = 5, phrase_seconds: int =
             wav_path = Path(temp_file.name)
 
         embedding = build_speaker_embedding(wav_path)
-        mfcc_sequence = build_mfcc_sequence(wav_path)
+
+        # MFCC is only used for DTW on registration-phrase matches.
+        # For short words it may fail — capture that gracefully so the
+        # cosine-only path still works.
+        try:
+            mfcc_sequence = build_mfcc_sequence(wav_path)
+        except Exception:
+            mfcc_sequence = None
+
         wav_path.unlink(missing_ok=True)
 
         return CaptureResult(spoken_text=spoken_text, embedding=embedding, mfcc_sequence=mfcc_sequence, error="")
     except sr.WaitTimeoutError:
-        return CaptureResult(spoken_text="", embedding=None, mfcc_sequence=None, error="⏱️ No speech detected in 5 seconds.")
+        return CaptureResult(
+            spoken_text="",
+            embedding=None,
+            mfcc_sequence=None,
+            error=f"⏱️ No speech detected in {timeout_seconds} seconds.",
+        )
     except sr.UnknownValueError:
         return CaptureResult(spoken_text="", embedding=None, mfcc_sequence=None, error="🔇 Could not understand speech. Try again clearly.")
     except sr.RequestError as err:

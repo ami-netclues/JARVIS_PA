@@ -3,9 +3,11 @@ import requests
 import numpy as np
 from pathlib import Path
 import re
-from simple_tts import text_to_voice
+import time
+from simple_tts import text_to_voice, text_to_voice_async, stop_speaking, is_speaking
 from Voice_match.voice_auth import (
     capture_speech_and_embedding,
+    is_voice_detected,
     cosine_similarity,
     load_voice_embedding,
     load_voice_sequences,
@@ -125,11 +127,15 @@ if "voice_verify_error" not in st.session_state:
     st.session_state.voice_verify_error = ""
 if "voice_verified_until" not in st.session_state:
     st.session_state.voice_verified_until = 0.0
+if "handsfree_active" not in st.session_state:
+    st.session_state.handsfree_active = False
+if "handsfree_status" not in st.session_state:
+    st.session_state.handsfree_status = ""
 
 # ── n8n Webhook ───────────────────────────────────────────────────────────────
 N8N_WEBHOOK_URL = "https://v1netclues.app.n8n.cloud/webhook/2a842b2d-2345-4fc1-a399-1838ac2c1da8"
 VOICE_USERS_DIR = Path("Voice_match/database/users")
-MAX_REGISTERED_USERS = 3
+MAX_REGISTERED_USERS = 5
 # Speaker verification thresholds (cosine similarity) tuned for resemblyzer-style embeddings.
 # If resemblyzer isn't installed, `voice_auth.py` falls back to weaker features; in that case
 # you may need to raise thresholds and/or re-register users.
@@ -170,7 +176,9 @@ def list_registered_users() -> list[str]:
         return []
     profiles = []
     for npy_path in VOICE_USERS_DIR.glob("*.npy"):
-        profiles.append(npy_path.stem)
+        stem = npy_path.stem
+        if not stem.endswith(".seq"):
+            profiles.append(stem)
     return sorted(profiles)
 
 
@@ -262,6 +270,140 @@ def send_message(text: str):
     st.session_state.messages.append({"role": "user", "content": text})
     st.session_state.mic_text = ""
     st.session_state.pending_user_text = text  # trigger thinking display on next render
+
+
+def verify_and_send_from_result(verify_result) -> bool:
+    stored_embedding = load_voice_embedding(get_user_profile_path(st.session_state.voice_username))
+    stored_sequences = load_voice_sequences(get_user_profile_path(st.session_state.voice_username))
+    stored_meta = load_voice_meta(get_user_profile_path(st.session_state.voice_username)) or {}
+
+    if verify_result.error:
+        st.session_state.voice_verify_error = verify_result.error
+        return False
+
+    required_mean = float(stored_meta.get("verify_mean_threshold", VOICE_SIMILARITY_MEAN_THRESHOLD))
+    required_max = float(stored_meta.get("verify_max_threshold", VOICE_SIMILARITY_MAX_THRESHOLD))
+
+    # Short utterances are inherently less reliable for speaker verification.
+    # Keep strict thresholds for 1-2 words and only apply a small discount for
+    # 3-word phrases.
+    word_count = len(verify_result.spoken_text.split()) if verify_result.spoken_text else 0
+    if word_count == 3:
+        discount = 0.90
+        required_mean = required_mean * discount
+        required_max = required_max * discount
+    elif word_count <= 2:
+        required_mean = max(required_mean, 0.66)
+        required_max = max(required_max, 0.70)
+
+    passed, mean_score, max_score = evaluate_voice_match_with_thresholds(
+        stored_embedding,
+        verify_result.embedding,
+        required_mean=required_mean,
+        required_max=required_max,
+    )
+    dtw_ok = True
+    dtw_score = None
+    if stored_sequences is None:
+        st.session_state.voice_verify_error = (
+            "Your voice profile is missing sequence data (older registration). "
+            "Please re-register your voice for stronger verification."
+        )
+        return False
+    try:
+        phrase_idx, phrase_ratio = best_prompt_match(verify_result.spoken_text, REGISTRATION_PHRASES)
+        use_dtw = phrase_idx >= 0 and phrase_ratio >= VOICE_CHALLENGE_MIN_RATIO
+
+        if use_dtw:
+            if verify_result.mfcc_sequence is None:
+                # Short utterance — MFCC unavailable, skip DTW and rely on cosine only
+                dtw_ok = True
+            else:
+                ref_seq = stored_sequences[phrase_idx]
+                dtw_score = float(dtw_distance(ref_seq, verify_result.mfcc_sequence))
+                dtw_ok = dtw_score <= VOICE_DTW_DISTANCE_THRESHOLD
+    except Exception as e:
+        st.session_state.voice_verify_error = f"DTW verification error: {e}"
+        return False
+
+    dtw_str = "n/a" if dtw_score is None else f"{dtw_score:.4f}"
+    print(
+        "[VERIFY:MIC] "
+        f"mean={mean_score:.4f} max={max_score:.4f} dtw={dtw_str} "
+        f"required_mean={required_mean:.4f} "
+        f"required_max={required_max:.4f}"
+    )
+    if not passed or not dtw_ok:
+        st.session_state.voice_verify_error = (
+            "🔒 Voice not matched. Message was NOT sent. "
+            f"(mean: {mean_score:.4f}, max: {max_score:.4f}, dtw: {dtw_str}, "
+            f"required mean/max/dtw: {required_mean:.4f}/{required_max:.4f}/{VOICE_DTW_DISTANCE_THRESHOLD:.4f})."
+        )
+        jarvis_unauth_msg = "You are not an authenticated person."
+        st.session_state.messages.append({"role": "assistant", "content": jarvis_unauth_msg})
+        try:
+            text_to_voice(jarvis_unauth_msg)
+        except Exception as e:
+            print(f"TTS Error: {e}")
+        return False
+
+    st.session_state.voice_verify_status = (
+        "✅ Voice verified "
+        f"(mean: {mean_score:.4f}, max: {max_score:.4f}, dtw: {dtw_str})."
+    )
+    st.session_state.voice_verified_until = time.time() + 60.0
+    send_message(verify_result.spoken_text)
+    return True
+
+
+def verify_and_send_captured_message() -> bool:
+    with st.spinner("🎙️ Listening and verifying voice…"):
+        verify_result = capture_speech_and_embedding(timeout_seconds=8, phrase_seconds=None)
+    return verify_and_send_from_result(verify_result)
+
+
+def _normalize_for_echo(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9 ]+", " ", (value or "").lower())
+    return " ".join(cleaned.split())
+
+
+def _is_likely_tts_echo(captured_text: str, assistant_text: str) -> bool:
+    captured = _normalize_for_echo(captured_text)
+    assistant = _normalize_for_echo(assistant_text)
+    if not captured or not assistant:
+        return False
+    if captured in assistant:
+        return True
+    captured_tokens = set(captured.split())
+    assistant_tokens = set(assistant.split())
+    if not captured_tokens:
+        return False
+    overlap = len(captured_tokens & assistant_tokens) / max(len(captured_tokens), 1)
+    return overlap >= 0.7
+
+
+def listen_for_barge_in_while_speaking(current_reply: str) -> bool:
+    """Interrupt Jarvis as soon as user voice is detected, then capture full question."""
+    # Wait briefly until TTS actually starts.
+    deadline = time.time() + 1.0
+    while not is_speaking() and time.time() < deadline:
+        time.sleep(0.03)
+
+    # Short guard to avoid immediate self-trigger from startup echo.
+    time.sleep(0.25)
+
+    while is_speaking():
+        if is_voice_detected(timeout_seconds=0.25):
+            # Confirm real speech (not just breathing/noise)
+            confirm_result = capture_speech_and_embedding(timeout_seconds=1, phrase_seconds=2)
+            spoken = (confirm_result.spoken_text or "").strip()
+            if not spoken or len(spoken.split()) < 2:
+                continue  # ignore noise, breathing, or single-word triggers
+            stop_speaking()
+            st.session_state.handsfree_status = "🎤 I heard you — listening to your question…"
+            # Fresh full capture so the entire sentence is recorded cleanly
+            return verify_and_send_captured_message()
+    return False
 
 # ── Resolve pending webhook call ───────────────────────────────────────────────
 pending = st.session_state.get("pending_user_text", "")
@@ -456,9 +598,15 @@ with chat_container:
             st.session_state.messages.append({"role": "assistant", "content": reply})
             st.session_state.pending_user_text = ""
             
-            # Speak the text
+            # Speak the text and allow barge-in while in hands-free mode
             try:
-                text_to_voice(reply)
+                if st.session_state.handsfree_active:
+                    text_to_voice_async(reply)
+                    interrupted = listen_for_barge_in_while_speaking(reply)
+                    if not interrupted:
+                        st.session_state.handsfree_status = "👂 Listening for your next question…"
+                else:
+                    text_to_voice(reply)
             except Exception as e:
                 print(f"TTS Error: {e}")
                 
@@ -468,6 +616,8 @@ with chat_container:
 if st.session_state.mic_error:
     st.error(st.session_state.mic_error)
     st.session_state.mic_error = ""
+if st.session_state.handsfree_status:
+    st.info(st.session_state.handsfree_status)
 # if st.session_state.mic_text:
 #     st.success(f"🎤 Heard: **{st.session_state.mic_text}**")
 
@@ -488,7 +638,7 @@ with st.form(key="chat_form", clear_on_submit=True):
         submitted = st.form_submit_button("Send", use_container_width=True, type="primary")
 
     with col_mic:
-        mic_clicked = st.form_submit_button("🎤", use_container_width=True, help="Click to speak")
+        mic_clicked = st.form_submit_button("🎤", use_container_width=True, help="Click once to start/stop hands-free voice")
 
     with col_clear:
         clear_clicked = st.form_submit_button("🗑️", use_container_width=True, help="Clear chat")
@@ -507,80 +657,18 @@ if submitted and user_input.strip():
 if mic_clicked:
     st.session_state.voice_verify_status = ""
     st.session_state.voice_verify_error = ""
-    allowed, reason = can_use_chat(st.session_state.voice_username)
-    if not allowed:
-        st.session_state.voice_verify_error = f"🔒 {reason}"
+    if st.session_state.handsfree_active:
+        st.session_state.handsfree_active = False
+        st.session_state.handsfree_status = "Hands-free mic stopped."
+        stop_speaking()
     else:
-        stored_embedding = load_voice_embedding(get_user_profile_path(st.session_state.voice_username))
-        stored_sequences = load_voice_sequences(get_user_profile_path(st.session_state.voice_username))
-        stored_meta = load_voice_meta(get_user_profile_path(st.session_state.voice_username)) or {}
-        with st.spinner("🎙️ Listening and verifying voice…"):
-            import time
-
-            # One-step flow: user speaks their actual message; we verify on that audio.
-            verify_result = capture_speech_and_embedding(timeout_seconds=8, phrase_seconds=15)
-
-        if verify_result.error:
-            st.session_state.voice_verify_error = verify_result.error
+        allowed, reason = can_use_chat(st.session_state.voice_username)
+        if not allowed:
+            st.session_state.voice_verify_error = f"🔒 {reason}"
         else:
-            required_mean = float(stored_meta.get("verify_mean_threshold", VOICE_SIMILARITY_MEAN_THRESHOLD))
-            required_max = float(stored_meta.get("verify_max_threshold", VOICE_SIMILARITY_MAX_THRESHOLD))
-            passed, mean_score, max_score = evaluate_voice_match_with_thresholds(
-                stored_embedding,
-                verify_result.embedding,
-                required_mean=required_mean,
-                required_max=required_max,
-            )
-            dtw_ok = True
-            dtw_score = None
-            if stored_sequences is None:
-                dtw_ok = False
-                st.session_state.voice_verify_error = (
-                    "Your voice profile is missing sequence data (older registration). "
-                    "Please re-register your voice for stronger verification."
-                )
-                st.rerun()
-            else:
-                try:
-                    # DTW is only reliable when the *spoken content* is close to one of the
-                    # enrollment phrases. For arbitrary questions, we skip DTW and use cosine only.
-                    phrase_idx, phrase_ratio = best_prompt_match(verify_result.spoken_text, REGISTRATION_PHRASES)
-                    use_dtw = phrase_idx >= 0 and phrase_ratio >= VOICE_CHALLENGE_MIN_RATIO
-
-                    if use_dtw:
-                        if verify_result.mfcc_sequence is None:
-                            raise ValueError("Could not extract MFCC sequence from captured audio")
-                        ref_seq = stored_sequences[phrase_idx]
-                        dtw_score = float(dtw_distance(ref_seq, verify_result.mfcc_sequence))
-                        dtw_ok = dtw_score <= VOICE_DTW_DISTANCE_THRESHOLD
-                    else:
-                        dtw_ok = True
-                except Exception as e:
-                    dtw_ok = False
-                    st.session_state.voice_verify_error = f"DTW verification error: {e}"
-                    st.rerun()
-
-            dtw_str = "n/a" if dtw_score is None else f"{dtw_score:.4f}"
-            print(
-                "[VERIFY:MIC] "
-                f"mean={mean_score:.4f} max={max_score:.4f} dtw={dtw_str} "
-                f"required_mean={required_mean:.4f} "
-                f"required_max={required_max:.4f}"
-            )
-            if not passed or not dtw_ok:
-                st.session_state.voice_verify_error = (
-                    "🔒 Voice not matched. Message was NOT sent. "
-                    f"(mean: {mean_score:.4f}, max: {max_score:.4f}, dtw: {dtw_str}, "
-                    f"required mean/max/dtw: {required_mean:.4f}/{required_max:.4f}/{VOICE_DTW_DISTANCE_THRESHOLD:.4f})."
-                )
-            else:
-                st.session_state.voice_verify_status = (
-                    "✅ Voice verified "
-                    f"(mean: {mean_score:.4f}, max: {max_score:.4f}, dtw: {dtw_str})."
-                )
-                st.session_state.voice_verified_until = time.time() + 60.0
-                # Send the user's actual spoken question
-                send_message(verify_result.spoken_text)
+            if verify_and_send_captured_message():
+                st.session_state.handsfree_active = True
+                st.session_state.handsfree_status = "✅ Hands-free mode on. I will keep listening automatically."
     st.rerun()
 
 if clear_clicked:
@@ -588,6 +676,17 @@ if clear_clicked:
     st.session_state.mic_text = ""
     st.session_state.mic_error = ""
     st.session_state.pending_user_text = ""
+    st.session_state.handsfree_active = False
+    st.session_state.handsfree_status = ""
+    stop_speaking()
     st.rerun()
 
-st.caption("💡 Supports up to 3 registered users · Select/enter registered user name first · Typed Send sends text directly · 🎤 verifies live speech every time · 🗑️ to clear chat")
+# ── Hands-free auto listening loop ─────────────────────────────────────────────
+if st.session_state.handsfree_active and not pending:
+    st.session_state.voice_verify_status = ""
+    st.session_state.voice_verify_error = ""
+    st.session_state.handsfree_status = "👂 Listening for your question…"
+    verify_and_send_captured_message()
+    st.rerun()
+
+st.caption("💡 Supports up to 3 registered users · Select/enter registered user name first · Typed Send sends text directly · 🎤 click once for hands-free continuous voice (click again to stop) · 🗑️ to clear chat")
