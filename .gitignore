@@ -118,3 +118,4 @@ Frontend/.env
 Frontend/package-lock.json
 test.ipynb
 Backend/app.log.1
+/Voice_match/database
