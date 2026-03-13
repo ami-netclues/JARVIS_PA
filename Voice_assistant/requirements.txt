@@ -1,0 +1,9 @@
+torch
+torchaudio
+transformers
+sounddevice
+numpy
+scipy
+faster-whisper
+gtts
+soundfile
