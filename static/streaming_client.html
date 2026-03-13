@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JARVIS Streaming Chat</title>
+    <style>
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            color: #e2e8f0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        .container {
+            width: 90%;
+            max-width: 600px;
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(132, 140, 248, 0.2);
+            text-align: center;
+        }
+        h1 {
+            color: #818cf8;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+        #status {
+            font-style: italic;
+            color: #94a3b8;
+            margin-bottom: 20px;
+            height: 24px;
+        }
+        .chat-area {
+            height: 300px;
+            overflow-y: auto;
+            margin-bottom: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 10px;
+            scroll-behavior: smooth;
+        }
+        .bubble {
+            padding: 12px 18px;
+            border-radius: 18px;
+            max-width: 80%;
+            word-wrap: break-word;
+            font-size: 0.95rem;
+            line-height: 1.4;
+        }
+        .user-bubble {
+            background: #4f46e5;
+            color: white;
+            align-self: flex-end;
+            border-bottom-right-radius: 4px;
+        }
+        .bot-bubble {
+            background: #1e293b;
+            color: #e2e8f0;
+            align-self: flex-start;
+            border-bottom-left-radius: 4px;
+            border: 1px solid #4f46e5;
+        }
+        .mic-btn {
+            background: #4f46e5;
+            color: white;
+            border: none;
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            font-size: 2rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto;
+            position: relative;
+        }
+        .mic-btn:hover {
+            transform: scale(1.05);
+            background: #6366f1;
+        }
+        .mic-btn:active {
+            transform: scale(0.95);
+        }
+        .mic-btn.active {
+            background: #ef4444;
+            box-shadow: 0 0 20px rgba(239, 68, 68, 0.5);
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        .visualizer {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            height: 40px;
+            margin-top: 20px;
+        }
+        .bar {
+            width: 4px;
+            background: #818cf8;
+            border-radius: 2px;
+            transition: height 0.1s ease;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 JARVIS</h1>
+        <div id="status">Click the mic to start JARVIS</div>
+        
+        <div class="chat-area" id="chatArea">
+            <div class="bubble bot-bubble">Hello! I am JARVIS. How can I assist you today?</div>
+        </div>
+
+        <button id="micBtn" class="mic-btn">🎙️</button>
+        
+        <div class="visualizer" id="visualizer">
+            <!-- Bars will be added by JS -->
+        </div>
+    </div>
+
+    <script>
+        const micBtn = document.getElementById('micBtn');
+        const status = document.getElementById('status');
+        const chatArea = document.getElementById('chatArea');
+        const visualizer = document.getElementById('visualizer');
+        
+        let ws;
+        let audioContext;
+        let mediaStream;
+        let processor;
+        let isRecording = false;
+        let audioQueue = [];
+        let isPlaying = false;
+
+        // Initialize visualizer bars
+        for (let i = 0; i < 20; i++) {
+            const bar = document.createElement('div');
+            bar.className = 'bar';
+            bar.style.height = '4px';
+            visualizer.appendChild(bar);
+        }
+
+        async function initAudio() {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            
+            const source = audioContext.createMediaStreamSource(mediaStream);
+            processor = audioContext.createScriptProcessor(512, 1, 1);
+            
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+            
+            processor.onaudioprocess = (e) => {
+                if (!isRecording || !ws || ws.readyState !== WebSocket.OPEN) return;
+                
+                const inputData = e.inputBuffer.getChannelData(0);
+                // Convert to 16-bit PCM
+                const pcmData = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+                }
+                
+                // Send in chunks of 480 samples (30ms at 16kHz)
+                // Note: ScriptureProcessor chunk size might vary, we might need a buffer here
+                // For simplicity, we send the whole buffer for now, server will need to handle it
+                ws.send(pcmData.buffer);
+                
+                // Update visualizer
+                updateVisualizer(inputData);
+            };
+        }
+
+        function updateVisualizer(data) {
+            const bars = document.querySelectorAll('.bar');
+            const step = Math.floor(data.length / bars.length);
+            for (let i = 0; i < bars.length; i++) {
+                let sum = 0;
+                for (let j = 0; j < step; j++) {
+                    sum += Math.abs(data[i * step + j]);
+                }
+                const avg = sum / step;
+                bars[i].style.height = Math.max(4, avg * 200) + 'px';
+            }
+        }
+
+        function toggleRecording() {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        }
+
+        async function startRecording() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                connectWS();
+            }
+            if (!audioContext) {
+                await initAudio();
+            }
+            isRecording = true;
+            micBtn.classList.add('active');
+            status.textContent = "Listening...";
+        }
+
+        function stopRecording() {
+            isRecording = false;
+            micBtn.classList.remove('active');
+            status.textContent = "Paused";
+            // Reset visualizer
+            document.querySelectorAll('.bar').forEach(bar => bar.style.height = '4px');
+        }
+
+        function connectWS() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat`);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                console.log('Connected to server');
+            };
+
+            ws.onmessage = async (event) => {
+                if (typeof event.data === 'string') {
+                    const msg = JSON.parse(event.data);
+                    handleJsonMessage(msg);
+                } else {
+                    // Binary audio data
+                    handleAudioChunk(event.data);
+                }
+            };
+
+            ws.onclose = () => {
+                console.log('Disconnected from server');
+                status.textContent = "Connection lost. Reconnecting...";
+                setTimeout(connectWS, 2000);
+            };
+        }
+
+        function handleJsonMessage(msg) {
+            if (msg.type === 'status') {
+                status.textContent = msg.value;
+            } else if (msg.type === 'transcript') {
+                addBubble(msg.value, 'user');
+            } else if (msg.type === 'bot_text') {
+                addBubble(msg.value, 'bot');
+            } else if (msg.type === 'tts_complete') {
+                status.textContent = "Listening...";
+            }
+        }
+
+        function addBubble(text, role) {
+            const bubble = document.createElement('div');
+            bubble.className = `bubble ${role}-bubble`;
+            bubble.textContent = text;
+            chatArea.appendChild(bubble);
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+        async function handleAudioChunk(chunk) {
+            audioQueue.push(chunk);
+            if (!isPlaying) {
+                playNextChunk();
+            }
+        }
+
+        async function playNextChunk() {
+            if (audioQueue.length === 0) {
+                isPlaying = false;
+                return;
+            }
+            isPlaying = true;
+            const chunk = audioQueue.shift();
+            
+            // Decodes the MP3 chunk from edge-tts
+            const audioBuffer = await audioContext.decodeAudioData(chunk);
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            source.onended = playNextChunk;
+            source.start();
+        }
+
+        micBtn.onclick = toggleRecording;
+        
+        // Connect on load
+        window.onload = connectWS;
+    </script>
+</body>
+</html>

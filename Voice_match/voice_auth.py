@@ -306,13 +306,16 @@ def is_voice_detected(timeout_seconds: float = 0.5) -> bool:
 
 def capture_speech_and_embedding(timeout_seconds: int = 5, phrase_seconds: int | None = None) -> CaptureResult:
     recognizer = sr.Recognizer()
-    # 1.6 s of silence = end of sentence; prevents cutting mid-sentence on short pauses
-    recognizer.pause_threshold = 1.6
+    # 0.8 s of silence = end of sentence; more responsive than 1.6s
+    recognizer.pause_threshold = 1.0
     recognizer.non_speaking_duration = 0.6
 
     try:
         with sr.Microphone() as source:
-            recognizer.adjust_for_ambient_noise(source, duration=0.4)
+            # Slightly longer adjustment for better ambient baseline
+            recognizer.adjust_for_ambient_noise(source, duration=0.6)
+            # Increase energy threshold slightly to avoid noise-triggering
+            recognizer.energy_threshold *= 1.2 
             if phrase_seconds is None:
                 audio = recognizer.listen(source, timeout=timeout_seconds)
             else:
