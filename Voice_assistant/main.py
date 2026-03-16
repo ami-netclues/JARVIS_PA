@@ -1,5 +1,6 @@
 import os
 import uuid
+import re
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
 
 import torch
@@ -17,7 +18,6 @@ from faster_whisper import WhisperModel
 
 warnings.filterwarnings("ignore")
 
-# Your verified n8n Webhook URL
 N8N_WEBHOOK_URL = "https://v1netclues.app.n8n.cloud/webhook/2a842b2d-2345-4fc1-a399-1838ac2c1da8"
 
 class VoiceAuthenticator:
@@ -64,7 +64,6 @@ class VoiceAuthenticator:
             return False
         cosine_sim = torch.nn.CosineSimilarity(dim=-1)
         similarity = cosine_sim(self.master_embedding, current_embedding).item()
-        print(f"Auth Score: {similarity:.3f} (Required: {self.threshold})")
         return similarity >= self.threshold
 
 class VoiceAssistant:
@@ -77,7 +76,7 @@ class VoiceAssistant:
         self.get_speech_timestamps = utils[0]
         self.stt_model = WhisperModel("base", device="cpu", compute_type="int8")
         self.audio_queue = queue.Queue()
-        self.last_audio_file = None
+        self.stop_playback = threading.Event()
 
     def extract_pure_speech(self, audio_data):
         tensor_audio = torch.tensor(audio_data).float()
@@ -99,37 +98,52 @@ class VoiceAssistant:
             print("ENROLLMENT FAILED\n")
 
     def kill_speech(self):
-        """Instantly stops audio and deletes the temp file to prevent locks."""
+        self.stop_playback.set()
         if pygame.mixer.get_init():
             pygame.mixer.music.stop()
-            try:
-                pygame.mixer.music.unload()
-            except AttributeError:
-                pass
-        
-        if self.last_audio_file and os.path.exists(self.last_audio_file):
-            try:
-                os.remove(self.last_audio_file)
-            except OSError:
-                pass
+            try: pygame.mixer.music.unload()
+            except AttributeError: pass
 
     def tts_and_play(self, text):
         print(f"JARVIS: {text}")
-        self.kill_speech() # Ensure absolute silence before speaking
+        self.kill_speech() 
+        self.stop_playback.clear()
         
-        try:
-            engine = pyttsx3.init()
-            engine.setProperty('rate', 200)
-            
-            # Use unique filenames to completely avoid file lock crashes
-            self.last_audio_file = f"reply_{uuid.uuid4().hex[:6]}.wav"
-            engine.save_to_file(text, self.last_audio_file)
-            engine.runAndWait()
-            
-            pygame.mixer.music.load(self.last_audio_file)
-            pygame.mixer.music.play()
-        except Exception as e:
-            print(f"TTS Error: {e}")
+        sentences = re.split(r'(?<=[.!?]) +', text)
+        if not sentences or not sentences[0]:
+            sentences = [text]
+
+        def play_worker():
+            try:
+                engine = pyttsx3.init()
+                engine.setProperty('rate', 215)
+                
+                for sentence in sentences:
+                    if self.stop_playback.is_set() or not sentence.strip():
+                        break
+                        
+                    audio_file = f"reply_{uuid.uuid4().hex[:6]}.wav"
+                    engine.save_to_file(sentence, audio_file)
+                    engine.runAndWait()
+                    
+                    if self.stop_playback.is_set():
+                        break
+                        
+                    pygame.mixer.music.load(audio_file)
+                    pygame.mixer.music.play()
+                    
+                    while pygame.mixer.music.get_busy():
+                        if self.stop_playback.is_set():
+                            pygame.mixer.music.stop()
+                            return
+                        pygame.time.Clock().tick(10)
+                        
+                    try: os.remove(audio_file)
+                    except OSError: pass
+            except Exception as e:
+                print(f"TTS Thread Error: {e}")
+
+        threading.Thread(target=play_worker, daemon=True).start()
 
     def process_speech(self, raw_audio_data):
         clean_audio = self.extract_pure_speech(raw_audio_data)
@@ -137,31 +151,29 @@ class VoiceAssistant:
             return
 
         sf.write("temp.wav", clean_audio, self.fs)
-        segments, _ = self.stt_model.transcribe("temp.wav", beam_size=5)
+        # task="translate" ensures non-English speech is translated to English text
+        segments, _ = self.stt_model.transcribe("temp.wav", beam_size=5, task="translate")
         user_text = "".join([s.text for s in segments]).strip()
         
         if user_text:
             print(f"You said: {user_text}")
             try:
-                print("Thinking...")
-                response = requests.post(N8N_WEBHOOK_URL, json={"message": user_text}, timeout=15)
-                response.raise_for_status()
-                
+                # Append instruction to guarantee English webhook response
+                payload_text = user_text + "\n(Please reply in English)"
+                response = requests.post(N8N_WEBHOOK_URL, json={"message": payload_text}, timeout=15)
                 res_data = response.json()
-                reply = ""
                 
                 if isinstance(res_data, list) and len(res_data) > 0:
-                    item = res_data[0]
-                    reply = item.get("output") or item.get("outpput") or item.get("text") or str(item)
+                    reply = res_data[0].get("output") or res_data[0].get("outpput") or str(res_data[0])
                 elif isinstance(res_data, dict):
-                    reply = res_data.get("output") or res_data.get("outpput") or res_data.get("text") or str(res_data)
+                    reply = res_data.get("output") or res_data.get("outpput") or str(res_data)
                 else:
                     reply = str(res_data)
 
-                threading.Thread(target=self.tts_and_play, args=(reply,), daemon=True).start()
+                self.tts_and_play(reply)
                 
             except Exception as e:
-                print(f"Cloud Connection Error: {e}")
+                print(f"API Error: {e}")
 
     def run_core_loop(self):
         print("\nJARVIS is listening... (Ctrl+C to stop)")
@@ -169,6 +181,7 @@ class VoiceAssistant:
         is_speaking = False
         consecutive_speech = 0
         silence_count = 0
+        auth_checked_for_interrupt = False
         
         def audio_callback(indata, frames, time, status):
             self.audio_queue.put(indata.copy())
@@ -181,20 +194,32 @@ class VoiceAssistant:
                 if speech_prob > 0.65:
                     consecutive_speech += 1
                     if consecutive_speech >= 2:
-                        # INSTANT INTERRUPTION: Kill audio if JARVIS is currently speaking
-                        if pygame.mixer.get_init() and pygame.mixer.music.get_busy():
-                            self.kill_speech()
-                            
                         if not is_speaking:
                             is_speaking = True
                             audio_buffer = []
+                            auth_checked_for_interrupt = False
+                            
                         audio_buffer.append(chunk)
                         silence_count = 0
+                        
+                        # SMART INTERRUPT: Check auth on the first ~0.9s of audio before killing playback
+                        current_len = sum(len(c) for c in audio_buffer)
+                        if not auth_checked_for_interrupt and current_len >= int(self.fs * 0.9):
+                            if pygame.mixer.get_init() and pygame.mixer.music.get_busy():
+                                temp_audio = np.concatenate(audio_buffer)
+                                emb = self.auth.get_embedding(temp_audio, self.fs)
+                                if emb is not None:
+                                    sim = torch.nn.CosineSimilarity(dim=-1)(self.auth.master_embedding, emb).item()
+                                    if sim >= self.auth.threshold:
+                                        self.kill_speech() # Only interrupt if it's the right user
+                            auth_checked_for_interrupt = True
+
                 elif is_speaking:
                     audio_buffer.append(chunk)
                     silence_count += 1
-                    if silence_count > 75:
+                    if silence_count > 35:
                         is_speaking = False
+                        consecutive_speech = 0
                         full_audio = np.concatenate(audio_buffer)
                         threading.Thread(target=self.process_speech, args=(full_audio,), daemon=True).start()
                         audio_buffer = []

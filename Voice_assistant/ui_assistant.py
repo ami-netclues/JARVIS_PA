@@ -68,6 +68,8 @@ if "master_embedding" not in st.session_state:
     st.session_state.master_embedding = None
 if "last_audio_file" not in st.session_state:
     st.session_state.last_audio_file = None
+if "continuous_listening" not in st.session_state:
+    st.session_state.continuous_listening = False
 
 # --- HELPER FUNCTIONS ---
 def kill_speech():
@@ -87,14 +89,13 @@ def kill_speech():
             pass
 
 def speak_text(text):
-    """Generates audio dynamically and plays it."""
+    """Generates audio dynamically and plays it asynchronously."""
     kill_speech()
     
     try:
         engine = pyttsx3.init()
         engine.setProperty('rate', 200)
         
-        # UUID prevents file lock crashes if the system holds onto the old file
         filename = f"ui_reply_{uuid.uuid4().hex[:6]}.wav"
         engine.save_to_file(text, filename)
         engine.runAndWait()
@@ -112,36 +113,91 @@ def get_embedding(audio_data):
         embeddings = v_mod(**inputs).embeddings
     return torch.nn.functional.normalize(embeddings, dim=-1)
 
-def record_until_silence(max_time=300, silence_limit=1.5, energy_threshold=0.01):
+def wait_for_speech_and_record(master_embedding):
+    """Waits for speech, intelligently interrupts if auth passes, and records until silence."""
     q = queue.Queue()
     def callback(indata, frames, time_info, status):
         q.put(indata.copy())
-    
-    audio_data = []
-    has_spoken = False
-    silence_start = None
 
-    with sd.InputStream(samplerate=FS, channels=1, callback=callback):
-        start_time = time.time()
-        while time.time() - start_time < max_time:
-            chunk = q.get()
-            audio_data.append(chunk)
-            volume = np.sqrt(np.mean(chunk**2))
+    audio_data = []
+    is_speaking = False
+    silence_count = 0
+    consecutive_speech = 0
+    auth_checked = False
+    auth_passed_early = False
+
+    with sd.InputStream(samplerate=FS, channels=1, blocksize=512, callback=callback):
+        while True:
+            chunk = q.get().flatten()
             
-            if volume > energy_threshold:
-                has_spoken = True
-                silence_start = None 
-            elif has_spoken:
-                if silence_start is None:
-                    silence_start = time.time()
-                elif time.time() - silence_start > silence_limit:
+            tensor_chunk = torch.tensor(chunk)
+            if len(tensor_chunk) == 512:
+                speech_prob = vad_mod(tensor_chunk, FS).item()
+            else:
+                speech_prob = 1.0 if np.sqrt(np.mean(chunk**2)) > 0.01 else 0.0
+
+            if speech_prob > 0.65:
+                consecutive_speech += 1
+                if consecutive_speech >= 2:
+                    if not is_speaking:
+                        is_speaking = True
+                    audio_data.append(chunk)
+                    silence_count = 0
+                    
+                    # Smart Interruption Logic: Buffer ~0.9s, then verify before killing speech
+                    current_len = sum(len(c) for c in audio_data)
+                    if not auth_checked and current_len >= int(FS * 0.9):
+                        temp_audio = np.concatenate(audio_data)
+                        emb = get_embedding(temp_audio)
+                        if emb is not None and master_embedding is not None:
+                            score = torch.nn.CosineSimilarity(dim=-1)(master_embedding, emb).item()
+                            if score >= AUTH_THRESHOLD:
+                                auth_passed_early = True
+                                kill_speech() # Only interrupt for the correct user
+                        auth_checked = True
+            elif is_speaking:
+                audio_data.append(chunk)
+                silence_count += 1
+                if silence_count > 35:  # Approx 1.5 seconds of silence stops recording
                     break
-    return np.concatenate(audio_data).flatten() if audio_data else np.array([])
+
+    final_audio = np.concatenate(audio_data).flatten() if audio_data else np.array([])
+    return final_audio, auth_passed_early
+
+# --- SIDEBAR ---
+with st.sidebar:
+    st.title("⚙️ Settings")
+    
+    if st.button("🎤 Register Voice", use_container_width=True):
+        status_placeholder = st.empty()
+        
+        # Step-by-step visual feedback for registration
+        with status_placeholder.container():
+            st.info("🎙️ Initializing microphone...")
+            time.sleep(1)
+            st.warning("🗣️ Recording started! Please speak naturally for 6 seconds...")
+            
+        rec = sd.rec(int(6 * FS), samplerate=FS, channels=1, dtype='float32')
+        sd.wait()
+        
+        with status_placeholder.container():
+            st.info("⚙️ Processing audio and building voice profile...")
+            st.session_state.master_embedding = get_embedding(rec.flatten())
+            st.success("✅ Voice successfully registered! JARVIS is now listening continuously.")
+            
+        time.sleep(2.5)
+        status_placeholder.empty()
+        st.session_state.continuous_listening = True # Automatically start continuous mode
+        st.rerun()
+
+    if st.session_state.master_embedding is not None:
+        st.success("Authentication Profile: Active")
+    else:
+        st.warning("Authentication Profile: Not Set")
 
 # --- MAIN UI ---
 st.markdown("<h1 style='text-align:center;'>🤖 JARVIS</h1>", unsafe_allow_html=True)
 
-# Display Full Chat (No container scroll)
 for msg in st.session_state.messages:
     div_class = "user-bubble" if msg["role"] == "user" else "bot-bubble"
     st.markdown(f"<div class='{div_class}'>{msg['content']}</div>", unsafe_allow_html=True)
@@ -153,55 +209,76 @@ with col1:
     user_input = st.chat_input("Message JARVIS...")
 
 with col2:
-    mic_btn = st.button("🎙️ Mic", use_container_width=True)
-
-# Processing Logic
-if mic_btn:
-    kill_speech()  # Force the old voice to stop instantly
-    if st.session_state.master_embedding is None:
-        st.error("Please register your voice in the sidebar.")
+    if st.session_state.continuous_listening:
+        mic_btn = st.button("🛑 Stop", use_container_width=True)
     else:
-        with st.spinner("Listening..."):
-            audio = record_until_silence()
-            if len(audio) > FS:
-                current_emb = get_embedding(audio)
-                score = torch.nn.CosineSimilarity(dim=-1)(st.session_state.master_embedding, current_emb).item()
-                if score >= AUTH_THRESHOLD:
-                    with st.spinner("Processing..."):
-                        sf.write("temp.wav", audio, FS)
-                        segments, _ = stt_model.transcribe("temp.wav")
-                        text = "".join([s.text for s in segments]).strip()
-                        if text:
-                            st.session_state.messages.append({"role": "user", "content": text})
-                            resp = requests.post(N8N_WEBHOOK_URL, json={"message": text}).json()
-                            bot_text = resp[0].get("output") or resp[0].get("outpput") if isinstance(resp, list) else resp.get("output")
-                            st.session_state.messages.append({"role": "assistant", "content": bot_text, "spoken": False})
-                            st.rerun()
+        mic_btn = st.button("🎙️ Mic", use_container_width=True)
 
+# Processing Text Input
 if user_input:
-    kill_speech()  # Stop the old voice instantly
+    kill_speech()
+    st.session_state.continuous_listening = False  # Typing disables continuous voice mode
     st.session_state.messages.append({"role": "user", "content": user_input})
     
-    # Get response from n8n
-    resp = requests.post(N8N_WEBHOOK_URL, json={"message": user_input}).json()
+    payload_text = user_input + "\n(Please reply in English)"
+    resp = requests.post(N8N_WEBHOOK_URL, json={"message": payload_text}).json()
     bot_text = resp[0].get("output") or resp[0].get("outpput") if isinstance(resp, list) else resp.get("output")
     
-    # Add to history and mark as NOT YET SPOKEN
     st.session_state.messages.append({"role": "assistant", "content": bot_text, "spoken": False})
     st.rerun()
 
-# Execute Audio for the new response
+# Processing Mic Button Toggle
+if mic_btn:
+    kill_speech()
+    if st.session_state.continuous_listening:
+        st.session_state.continuous_listening = False
+        st.rerun()
+    else:
+        if st.session_state.master_embedding is None:
+            st.error("Please register your voice in the sidebar first.")
+        else:
+            st.session_state.continuous_listening = True
+            st.rerun()
+
+# Playback execution for the latest unspoken message
 if st.session_state.messages:
     last_msg = st.session_state.messages[-1]
     if last_msg["role"] == "assistant" and not last_msg.get("spoken", False):
         st.session_state.messages[-1]["spoken"] = True
         speak_text(last_msg["content"])
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.title("⚙️ Settings")
-    if st.button("🎤 Register Voice", use_container_width=True):
-        rec = sd.rec(int(6 * FS), samplerate=FS, channels=1, dtype='float32')
-        sd.wait()
-        st.session_state.master_embedding = get_embedding(rec.flatten())
-        st.rerun()
+# --- CONTINUOUS LISTENING LOOP ---
+if st.session_state.continuous_listening:
+    with st.spinner("Listening... (Speak naturally to interact or interrupt)"):
+        audio, auth_passed = wait_for_speech_and_record(st.session_state.master_embedding)
+        
+        if len(audio) > FS:  # Ignore clips less than 1 second
+            if not auth_passed:
+                # Do a final check if it wasn't validated early during the interruption logic
+                current_emb = get_embedding(audio)
+                if current_emb is not None:
+                    score = torch.nn.CosineSimilarity(dim=-1)(st.session_state.master_embedding, current_emb).item()
+                    auth_passed = (score >= AUTH_THRESHOLD)
+            
+            if auth_passed:
+                with st.spinner("Processing..."):
+                    sf.write("temp.wav", audio, FS)
+                    # task="translate" forces English transcription regardless of spoken language
+                    segments, _ = stt_model.transcribe("temp.wav", task="translate")
+                    text = "".join([s.text for s in segments]).strip()
+                    if text:
+                        st.session_state.messages.append({"role": "user", "content": text})
+                        try:
+                            # Force english context for the webhook
+                            payload_text = text + "\n(Please reply in English)"
+                            resp = requests.post(N8N_WEBHOOK_URL, json={"message": payload_text}).json()
+                            bot_text = resp[0].get("output") or resp[0].get("outpput") if isinstance(resp, list) else resp.get("output")
+                        except Exception as e:
+                            bot_text = "I encountered an error connecting to my neural network."
+                            
+                        st.session_state.messages.append({"role": "assistant", "content": bot_text, "spoken": False})
+            else:
+                st.toast("Voice signature not recognized. Request ignored.", icon="🛡️")
+                
+    # Automatically loop without requiring another button click
+    st.rerun()
