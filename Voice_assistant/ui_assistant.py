@@ -11,8 +11,10 @@ import streamlit as st
 import queue
 import time
 import pygame
+import re
 from transformers import Wav2Vec2FeatureExtractor, WavLMForXVector
 from faster_whisper import WhisperModel
+from database import VoiceDatabase
 
 # Disable unnecessary logs
 warnings.filterwarnings("ignore")
@@ -22,6 +24,8 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
 N8N_WEBHOOK_URL = "https://v1netclues.app.n8n.cloud/webhook/2a842b2d-2345-4fc1-a399-1838ac2c1da8"
 FS = 16000
 AUTH_THRESHOLD = 0.88
+DB_PATH = r"c:\Users\darshil.patel\Documents\GitHub\JARVIS_PA\Voice_match\database\voice_profiles.db"
+db = VoiceDatabase(DB_PATH)
 
 # Ensure pygame mixer is initialized for audio playback
 if not pygame.mixer.get_init():
@@ -64,12 +68,20 @@ f_ext, v_mod, vad_mod, get_ts, stt_model = load_all_models()
 # --- STATE MANAGEMENT ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "master_embedding" not in st.session_state:
-    st.session_state.master_embedding = None
+if "profiles" not in st.session_state:
+    st.session_state.profiles = db.get_all_profiles()
 if "last_audio_file" not in st.session_state:
     st.session_state.last_audio_file = None
 if "continuous_listening" not in st.session_state:
     st.session_state.continuous_listening = False
+if "enrollment_step" not in st.session_state:
+    st.session_state.enrollment_step = 0
+if "enrollment_data" not in st.session_state:
+    st.session_state.enrollment_data = []
+if "enroll_slot" not in st.session_state:
+    st.session_state.enroll_slot = 1
+if "enroll_name" not in st.session_state:
+    st.session_state.enroll_name = ""
 
 # --- HELPER FUNCTIONS ---
 def kill_speech():
@@ -107,13 +119,39 @@ def speak_text(text):
         print(f"TTS Error: {e}")
 
 def get_embedding(audio_data):
+    """Generates a normalized voice embedding from audio data."""
     waveform = torch.tensor(audio_data).float().unsqueeze(0)
     inputs = f_ext(waveform.squeeze().numpy(), sampling_rate=FS, return_tensors="pt", padding=True)
     with torch.no_grad():
         embeddings = v_mod(**inputs).embeddings
     return torch.nn.functional.normalize(embeddings, dim=-1)
 
-def wait_for_speech_and_record(master_embedding):
+def verify_voice(audio_data):
+    if not st.session_state.profiles:
+        return None
+    
+    current_emb = get_embedding(audio_data)
+    if current_emb is None:
+        return None
+        
+    best_score = -1
+    best_user = None
+    
+    cosine_sim = torch.nn.CosineSimilarity(dim=-1)
+    for profile in st.session_state.profiles:
+        emb = torch.tensor(profile['embedding'])
+        if emb.dim() == 1:
+            emb = emb.unsqueeze(0)
+        score = cosine_sim(emb, current_emb).item()
+        if score > best_score:
+            best_score = score
+            best_user = profile['user_name']
+            
+    if best_score >= AUTH_THRESHOLD:
+        return best_user
+    return None
+
+def wait_for_speech_and_record():
     """Waits for speech, intelligently interrupts if auth passes, and records until silence."""
     q = queue.Queue()
     def callback(indata, frames, time_info, status):
@@ -148,12 +186,10 @@ def wait_for_speech_and_record(master_embedding):
                     current_len = sum(len(c) for c in audio_data)
                     if not auth_checked and current_len >= int(FS * 0.9):
                         temp_audio = np.concatenate(audio_data)
-                        emb = get_embedding(temp_audio)
-                        if emb is not None and master_embedding is not None:
-                            score = torch.nn.CosineSimilarity(dim=-1)(master_embedding, emb).item()
-                            if score >= AUTH_THRESHOLD:
-                                auth_passed_early = True
-                                kill_speech() # Only interrupt for the correct user
+                        recognized_user = verify_voice(temp_audio)
+                        if recognized_user:
+                            auth_passed_early = True
+                            kill_speech() # Only interrupt for correct user
                         auth_checked = True
             elif is_speaking:
                 audio_data.append(chunk)
@@ -168,32 +204,85 @@ def wait_for_speech_and_record(master_embedding):
 with st.sidebar:
     st.title("⚙️ Settings")
     
-    if st.button("🎤 Register Voice", use_container_width=True):
-        status_placeholder = st.empty()
+    st.subheader("🎤 Voice Registration")
+    
+    # Registration Flow UI
+    if st.session_state.enrollment_step == 0:
+        st.session_state.enroll_slot = st.selectbox("Select Slot", [1, 2, 3], index=st.session_state.enroll_slot - 1)
+        st.session_state.enroll_name = st.text_input("User Name", value=st.session_state.enroll_name)
         
-        # Step-by-step visual feedback for registration
-        with status_placeholder.container():
-            st.info("🎙️ Initializing microphone...")
-            time.sleep(1)
-            st.warning("🗣️ Recording started! Please speak naturally for 6 seconds...")
-            
-        rec = sd.rec(int(6 * FS), samplerate=FS, channels=1, dtype='float32')
-        sd.wait()
-        
-        with status_placeholder.container():
-            st.info("⚙️ Processing audio and building voice profile...")
-            st.session_state.master_embedding = get_embedding(rec.flatten())
-            st.success("✅ Voice successfully registered! JARVIS is now listening continuously.")
-            
-        time.sleep(2.5)
-        status_placeholder.empty()
-        st.session_state.continuous_listening = True # Automatically start continuous mode
-        st.rerun()
-
-    if st.session_state.master_embedding is not None:
-        st.success("Authentication Profile: Active")
+        if st.button("Start Registration"):
+            if not st.session_state.enroll_name.strip():
+                st.error("Please enter a name.")
+            else:
+                st.session_state.enrollment_step = 1
+                st.session_state.enrollment_data = []
+                st.rerun()
     else:
-        st.warning("Authentication Profile: Not Set")
+        sentences = [
+            "I use Jarvis every single day",
+            "I am registering my voice for the JARVIS personal assistant.",
+            "Voice authentication keeps me safe",
+            "The integration of voice authentication enhances system security.",
+            "My voice is my password, and it is unique to me."
+        ]
+        
+        step = st.session_state.enrollment_step
+        if step <= 5:
+            target = sentences[step-1]
+            st.write(f"**Step {step} of 5**")
+            st.info(f"Please say: \"{target}\"")
+            
+            if st.button(f"Record Sentence {step}", key=f"rec_{step}"):
+                with st.spinner("Recording..."):
+                    duration = max(3, len(target.split()) * 0.6)
+                    rec = sd.rec(int(duration * FS), samplerate=FS, channels=1, dtype='float32')
+                    sd.wait()
+                    
+                    # Extract speech and verify with Whisper
+                    audio = rec.flatten()
+                    sf.write("enroll_temp.wav", audio, FS)
+                    segments, _ = stt_model.transcribe("enroll_temp.wav", task="translate")
+                    spoken_text = "".join([s.text for s in segments]).strip().lower()
+                    
+                    target_clean = re.sub(r'[^\w\s]', '', target.lower())
+                    spoken_clean = re.sub(r'[^\w\s]', '', spoken_text)
+                    
+                    if len(spoken_clean) < len(target_clean) * 0.8:
+                        st.error(f"Did not match closely enough. You said: \"{spoken_text}\"")
+                    else:
+                        st.session_state.enrollment_data.append(audio)
+                        st.session_state.enrollment_step += 1
+                        st.rerun()
+        else:
+            with st.spinner("Processing final voice profile..."):
+                unified = np.concatenate(st.session_state.enrollment_data)
+                emb = get_embedding(unified)
+                if emb is not None:
+                    db.save_profile(st.session_state.enroll_slot, st.session_state.enroll_name, emb)
+                    st.session_state.profiles = db.get_all_profiles()
+                    st.success(f"✅ Registered {st.session_state.enroll_name}!")
+                    st.session_state.enrollment_step = 0
+                    st.session_state.enrollment_data = []
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.error("Failed to generate embedding.")
+                    st.session_state.enrollment_step = 0
+
+    st.divider()
+    st.subheader("👥 Profiles")
+    for p in st.session_state.profiles:
+        st.text(f"Slot {p['slot_id']}: {p['user_name']}")
+        if st.button(f"Delete Slot {p['slot_id']}", key=f"del_{p['slot_id']}"):
+            db.delete_profile(p['slot_id'])
+            st.session_state.profiles = db.get_all_profiles()
+            st.rerun()
+
+    if st.session_state.profiles:
+        st.success("Authentication: Active")
+    else:
+        st.warning("Authentication: No Profiles Set")
 
 # --- MAIN UI ---
 st.markdown("<h1 style='text-align:center;'>🤖 JARVIS</h1>", unsafe_allow_html=True)
@@ -234,7 +323,7 @@ if mic_btn:
         st.session_state.continuous_listening = False
         st.rerun()
     else:
-        if st.session_state.master_embedding is None:
+        if not st.session_state.profiles:
             st.error("Please register your voice in the sidebar first.")
         else:
             st.session_state.continuous_listening = True
@@ -250,18 +339,19 @@ if st.session_state.messages:
 # --- CONTINUOUS LISTENING LOOP ---
 if st.session_state.continuous_listening:
     with st.spinner("Listening... (Speak naturally to interact or interrupt)"):
-        audio, auth_passed = wait_for_speech_and_record(st.session_state.master_embedding)
+        audio, auth_passed_early = wait_for_speech_and_record()
         
+        recognized_user = None
         if len(audio) > FS:  # Ignore clips less than 1 second
-            if not auth_passed:
-                # Do a final check if it wasn't validated early during the interruption logic
-                current_emb = get_embedding(audio)
-                if current_emb is not None:
-                    score = torch.nn.CosineSimilarity(dim=-1)(st.session_state.master_embedding, current_emb).item()
-                    auth_passed = (score >= AUTH_THRESHOLD)
+            if auth_passed_early:
+                # We already killed speech, so we know someone is authorized. 
+                # Let's find exactly who for the UI.
+                recognized_user = verify_voice(audio)
+            else:
+                recognized_user = verify_voice(audio)
             
-            if auth_passed:
-                with st.spinner("Processing..."):
+            if recognized_user:
+                with st.spinner(f"Processing ({recognized_user})..."):
                     sf.write("temp.wav", audio, FS)
                     # task="translate" forces English transcription regardless of spoken language
                     segments, _ = stt_model.transcribe("temp.wav", task="translate")
@@ -278,7 +368,8 @@ if st.session_state.continuous_listening:
                             
                         st.session_state.messages.append({"role": "assistant", "content": bot_text, "spoken": False})
             else:
-                st.toast("Voice signature not recognized. Request ignored.", icon="🛡️")
+                st.toast("⚠️ You are not an authenticated person.", icon="🛡️")
+                speak_text("I'm sorry, you are not an authorized user.")
                 
     # Automatically loop without requiring another button click
     st.rerun()
