@@ -117,6 +117,10 @@ if "enroll_slot" not in st.session_state:
     st.session_state.enroll_slot = 1
 if "enroll_name" not in st.session_state:
     st.session_state.enroll_name = ""
+if "last_auth_time" not in st.session_state:
+    st.session_state.last_auth_time = 0
+if "last_recognized_user" not in st.session_state:
+    st.session_state.last_recognized_user = None
 
 # --- HELPER FUNCTIONS ---
 def kill_speech():
@@ -160,7 +164,7 @@ def get_embedding(audio_data):
         embeddings = v_mod(**inputs).embeddings
     return torch.nn.functional.normalize(embeddings, dim=-1)
 
-def verify_voice(audio_data):
+def verify_voice(audio_data, threshold=AUTH_THRESHOLD):
     if not st.session_state.profiles:
         return None
     
@@ -181,7 +185,9 @@ def verify_voice(audio_data):
             best_score = score
             best_user = profile['user_name']
             
-    if best_score >= AUTH_THRESHOLD:
+    if best_score >= threshold:
+        st.session_state.last_auth_time = time.time()
+        st.session_state.last_recognized_user = best_user
         return best_user
     return None
 
@@ -377,17 +383,24 @@ if st.session_state.messages:
 
 # --- CONTINUOUS LISTENING LOOP ---
 if st.session_state.continuous_listening:
-    with st.spinner("Listening... (Speak naturally to interact or interrupt)"):
+    with st.spinner("Listening..."):
         audio, auth_passed_early = wait_for_speech_and_record()
         
         recognized_user = None
-        if len(audio) > FS:  # Ignore clips less than 1 second
+        current_time = time.time()
+        grace_period_active = (current_time - st.session_state.last_auth_time < 15)
+        
+        if len(audio) > int(FS * 0.4):  # Reduced from 1.0s to 0.4s to allow "ok", "yes"
             if auth_passed_early:
-                # We already killed speech, so we know someone is authorized. 
-                # Let's find exactly who for the UI.
-                recognized_user = verify_voice(audio)
+                recognized_user = st.session_state.last_recognized_user
             else:
-                recognized_user = verify_voice(audio)
+                # Use a slightly more lenient threshold during conversation grace period
+                temp_threshold = 0.82 if grace_period_active else AUTH_THRESHOLD
+                recognized_user = verify_voice(audio, threshold=temp_threshold)
+            
+            # If still not recognized but in grace period, trust it's the same user for short clips
+            if not recognized_user and grace_period_active and len(audio) < FS:
+                recognized_user = st.session_state.last_recognized_user
             
             if recognized_user:
                 with st.spinner(f"Processing ({recognized_user})..."):
