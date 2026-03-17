@@ -37,20 +37,55 @@ st.set_page_config(page_title="JARVIS PA", page_icon="🤖", layout="centered")
 # Professional Clean UI Styling
 st.markdown("""
     <style>
-    .stApp { background-color: #ffffff; color: #000000; }
+    /* Inter font for a modern feel */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+    
+    .stApp { font-family: 'Inter', sans-serif; }
+
+    /* Bubble Styling - Theme Aware */
+    .user-container {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        margin-bottom: 20px;
+    }
+    .bot-container {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        margin-bottom: 20px;
+    }
+    
     .user-bubble {
-        background-color: #000000; color: #ffffff; padding: 14px 20px; 
-        border-radius: 20px 20px 4px 20px; margin: 15px 0 15px auto; 
-        max-width: 80%; width: fit-content; font-family: 'Inter', sans-serif;
+        background-color: #000000; color: #ffffff; padding: 12px 18px; 
+        border-radius: 20px 20px 4px 20px;
+        max-width: 80%; width: fit-content;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.1);
     }
     .bot-bubble {
-        background-color: #f8f9fa; color: #000000; padding: 14px 20px; 
-        border-radius: 20px 20px 20px 4px; margin: 15px auto 15px 0; 
-        max-width: 80%; width: fit-content; border: 1px solid #e9ecef;
-        font-family: 'Inter', sans-serif;
+        background-color: #f0f2f6; color: #1f1f1f; padding: 12px 18px; 
+        border-radius: 20px 20px 20px 4px; border: 1px solid #e0e0e0;
+        max-width: 80%; width: fit-content;
     }
-    h1 { font-weight: 800; color: #000000 !important; margin-bottom: 30px; }
-    .stButton>button { border: 1px solid #000000; border-radius: 8px; font-weight: 600; }
+    
+    /* Dark Mode Overrides for Bot Bubble */
+    @media (prefers-color-scheme: dark) {
+        .bot-bubble {
+            background-color: #262730; color: #e0e0e0; border: 1px solid #464855;
+        }
+        .user-bubble {
+            background-color: #ffffff; color: #000000;
+        }
+    }
+
+    .bubble-label {
+        font-size: 0.75rem; font-weight: 600; color: #888; margin-bottom: 4px;
+        text-transform: uppercase; letter-spacing: 0.5px;
+    }
+
+    h1 { font-weight: 800; text-align: center; margin-bottom: 20px; }
+    .stButton>button { border-radius: 10px; font-weight: 600; transition: all 0.2s; }
+    .stButton>button:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
     </style>
     """, unsafe_allow_html=True)
 
@@ -91,15 +126,14 @@ def kill_speech():
         try:
             pygame.mixer.music.unload()
         except AttributeError:
-            pass
+            print("Pygame version does not support unload, skipping.")
             
     # Clean up the old audio file to prevent storage bloat
     if st.session_state.last_audio_file and os.path.exists(st.session_state.last_audio_file):
         try:
             os.remove(st.session_state.last_audio_file)
         except OSError:
-            pass
-
+            print(f"Failed to delete {st.session_state.last_audio_file}")
 def speak_text(text):
     """Generates audio dynamically and plays it asynchronously."""
     kill_speech()
@@ -287,9 +321,14 @@ with st.sidebar:
 # --- MAIN UI ---
 st.markdown("<h1 style='text-align:center;'>🤖 JARVIS</h1>", unsafe_allow_html=True)
 
-for msg in st.session_state.messages:
-    div_class = "user-bubble" if msg["role"] == "user" else "bot-bubble"
-    st.markdown(f"<div class='{div_class}'>{msg['content']}</div>", unsafe_allow_html=True)
+# Keep chat history inside a fixed-height scrollable box
+chat_container = st.container(height=450, border=True)
+with chat_container:
+    for msg in st.session_state.messages:
+        if msg["role"] == "user":
+            st.markdown(f"<div class='user-container'><div class='bubble-label'>You</div><div class='user-bubble'>{msg['content']}</div></div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div class='bot-container'><div class='bubble-label'>Jarvis</div><div class='bot-bubble'>{msg['content']}</div></div>", unsafe_allow_html=True)
 
 st.divider()
 col1, col2 = st.columns([6, 1])
