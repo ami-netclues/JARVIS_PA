@@ -10,6 +10,9 @@ type ChatMessage = {
   text: string;
 };
 
+const SILENCE_DELAY_MS = 1300;
+const SILENCE_THRESHOLD = 15;
+
 const App: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [recognizedText, setRecognizedText] = useState("");
@@ -23,6 +26,13 @@ const App: React.FC = () => {
   const audioChunksRef = useRef<Blob[]>([]);
   const isRecordingRef = useRef(false);
   const autoListenRef = useRef(true);
+  const recognizedTextRef = useRef("");
+
+  // Audio silence refs
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const silenceStartRef = useRef<number | null>(null);
+
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const userScrolledUpRef = useRef(false);
@@ -48,6 +58,7 @@ const App: React.FC = () => {
       rec.onresult = (event: SpeechRecognitionEvent) => {
         const t = event.results[0]?.[0]?.transcript ?? "";
         setRecognizedText(t);
+        recognizedTextRef.current = t;
       };
 
       rec.onerror = () => {
@@ -76,6 +87,7 @@ const App: React.FC = () => {
     // keep history visible, so don't clear messages here
     setReplyText("");
     setRecognizedText("");
+    recognizedTextRef.current = "";
     setStatus("Requesting microphone...");
 
     try {
@@ -99,6 +111,47 @@ const App: React.FC = () => {
       isRecordingRef.current = true;
       setStatus("Recording...");
 
+      // --- Silence Detection Setup ---
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtx) {
+        const audioContext = new AudioCtx();
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        const source = audioContext.createMediaStreamSource(stream);
+        source.connect(analyser);
+
+        const bufferLength = analyser.frequencyBinCount;
+        const dataArray = new Uint8Array(bufferLength);
+
+        const checkAudioLevel = () => {
+          if (!isRecordingRef.current) return;
+
+          analyser.getByteFrequencyData(dataArray);
+          let sum = 0;
+          for (let i = 0; i < bufferLength; i++) {
+            sum += dataArray[i];
+          }
+          const average = sum / bufferLength;
+
+          if (average < SILENCE_THRESHOLD) {
+            if (!silenceStartRef.current) {
+              silenceStartRef.current = Date.now();
+            } else if (Date.now() - silenceStartRef.current > SILENCE_DELAY_MS) {
+              void stopRecording();
+              return; // Stop the loop
+            }
+          } else {
+            silenceStartRef.current = null;
+          }
+
+          animationFrameRef.current = requestAnimationFrame(checkAudioLevel);
+        };
+
+        animationFrameRef.current = requestAnimationFrame(checkAudioLevel);
+        audioContextRef.current = audioContext;
+      }
+      // -------------------------------
+
       if (recognitionRef.current) {
         try {
           recognitionRef.current.start();
@@ -114,6 +167,17 @@ const App: React.FC = () => {
 
   const stopRecording = async () => {
     if (!mediaRecorderRef.current) return;
+
+    // Clean up silence detection
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    if (audioContextRef.current) {
+      void audioContextRef.current.close().catch(() => { });
+      audioContextRef.current = null;
+    }
+    silenceStartRef.current = null;
 
     setStatus("Stopping...");
     mediaRecorderRef.current.stop();
@@ -137,7 +201,7 @@ const App: React.FC = () => {
   const processAudioAndSend = async () => {
     const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
 
-    let text = recognizedText.trim();
+    let text = recognizedTextRef.current.trim();
 
     if (!text) {
       // Optional: send audio to backend /api/transcribe if you enable it.
@@ -223,30 +287,30 @@ const App: React.FC = () => {
         {/* STT and TTS status */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap", marginLeft: "auto" }}>
-              <span
-                style={{
-                  padding: "0.25rem 0.6rem",
-                  borderRadius: "999px",
-                  fontSize: "0.8rem",
-                  border: "1px solid rgba(148,163,184,0.22)",
-                  background: "rgba(15,23,42,0.55)",
-                  color: "#cbd5e1",
-                }}
-              >
-                STT: {canUseSpeechRecognition ? "Browser" : "Not supported"}
-              </span>
-              <span
-                style={{
-                  padding: "0.25rem 0.6rem",
-                  borderRadius: "999px",
-                  fontSize: "0.8rem",
-                  border: "1px solid rgba(148,163,184,0.22)",
-                  background: "rgba(15,23,42,0.55)",
-                  color: "#cbd5e1",
-                }}
-              >
-                TTS: {isSpeechSupported ? "Browser" : "Not supported"}
-              </span>
+            <span
+              style={{
+                padding: "0.25rem 0.6rem",
+                borderRadius: "999px",
+                fontSize: "0.8rem",
+                border: "1px solid rgba(148,163,184,0.22)",
+                background: "rgba(15,23,42,0.55)",
+                color: "#cbd5e1",
+              }}
+            >
+              STT: {canUseSpeechRecognition ? "Browser" : "Not supported"}
+            </span>
+            <span
+              style={{
+                padding: "0.25rem 0.6rem",
+                borderRadius: "999px",
+                fontSize: "0.8rem",
+                border: "1px solid rgba(148,163,184,0.22)",
+                background: "rgba(15,23,42,0.55)",
+                color: "#cbd5e1",
+              }}
+            >
+              TTS: {isSpeechSupported ? "Browser" : "Not supported"}
+            </span>
           </div>
         </div>
 
@@ -262,7 +326,7 @@ const App: React.FC = () => {
           }}
         >
           <div>
-            <h1 style={{ fontSize: "1.75rem", marginBottom: "0.25rem" , alignItems: "center", justifyContent: "center"}}>
+            <h1 style={{ fontSize: "1.75rem", marginBottom: "0.25rem", alignItems: "center", justifyContent: "center" }}>
               Jarvis Voice Assistant
             </h1>
             <div style={{ color: "#9ca3af", fontSize: "0.95rem" }}>
@@ -385,7 +449,7 @@ const App: React.FC = () => {
         </div>
 
 
-        {/* Error message*/}  
+        {/* Error message*/}
         {error && (
           <div
             style={{
