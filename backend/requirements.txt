@@ -1,0 +1,11 @@
+fastapi==0.115.8
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+httpx==0.27.2
+pydantic==2.10.6
+pydantic-settings==2.7.1
+orjson==3.10.7
+
+# Optional transcription support (install only if you want /api/transcribe enabled)
+# faster-whisper==1.0.3
+# torch==2.5.1
