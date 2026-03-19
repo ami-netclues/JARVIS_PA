@@ -1,15 +1,18 @@
 from __future__ import annotations
-
 import logging
-from typing import Any
-
+from typing import Any, List, Optional
 import httpx
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel, Field
 
 from app.settings import settings
+from app.auth import auth_manager
+import tempfile
+import os
+import subprocess
+import numpy as np
 
 
 logger = logging.getLogger("jarvis-backend")
@@ -23,6 +26,26 @@ class MessageRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     replyText: str
+
+
+class RegisterRequest(BaseModel):
+    name: str
+    pcmData: List[float]
+    password: str = Field(default="")
+
+
+class VerifyRequest(BaseModel):
+    name: str
+    pcmData: List[float]
+
+
+class AuthResponse(BaseModel):
+    success: bool
+    message: str
+    score: Optional[float] = None
+    authenticated: Optional[bool] = None
+
+# FFmpeg conversion removed in favor of direct librosa processing in endpoints to avoid 'FFmpeg not found' errors.
 
 
 app = FastAPI(title="Jarvis Voice Backend", default_response_class=ORJSONResponse)
@@ -149,4 +172,72 @@ async def transcribe(file: UploadFile = File(...)) -> dict[str, str]:
 
     text = " ".join(seg.text.strip() for seg in segments).strip()
     return {"text": text}
+
+
+# --- Voice Auth Endpoints ---
+
+@app.get("/api/auth/profiles")
+async def get_profiles():
+    return {"profiles": auth_manager.get_profiles()}
+
+
+@app.delete("/api/auth/profiles/{name}", response_model=AuthResponse)
+async def delete_profile(name: str, password: str = ""):
+    if password != "pass123":
+        return AuthResponse(success=False, message="Invalid admin password")
+    
+    success = auth_manager.delete_profile(name)
+    if success:
+        return AuthResponse(success=True, message=f"Profile '{name}' deleted")
+    else:
+        return AuthResponse(success=False, message="Profile not found")
+
+
+@app.post("/api/auth/register", response_model=AuthResponse)
+async def register(file: UploadFile = File(...), user_id: str = Form(...), password: str = Form(default="")):
+    if password != "pass123":
+        return AuthResponse(success=False, message="Invalid admin password")
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".upload") as temp_input:
+        temp_input.write(await file.read())
+        temp_input_path = temp_input.name
+        
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_output:
+        temp_output_path = temp_output.name
+        
+    try:
+        # Pass the raw temp file directly to auth_manager, which now handles librosa.load internally
+        success = auth_manager.register_profile(user_id, temp_input_path)
+        if success:
+            return AuthResponse(success=True, message=f"Profile '{user_id}' registered successfully")
+        else:
+            return AuthResponse(success=False, message="Failed to register profile (maybe name exists or limit reached)")
+    finally:
+        if os.path.exists(temp_input_path):
+            os.remove(temp_input_path)
+        if os.path.exists(temp_output_path):
+            os.remove(temp_output_path)
+
+
+@app.post("/api/auth/verify", response_model=AuthResponse)
+async def verify(file: UploadFile = File(...), user_id: str = Form(...)):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".upload") as temp_input:
+        temp_input.write(await file.read())
+        temp_input_path = temp_input.name
+        
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_output:
+        temp_output_path = temp_output.name
+        
+    try:
+        # Pass the raw temp file directly to auth_manager, which now handles librosa.load internally
+        authenticated, score = auth_manager.verify_voice(user_id, temp_input_path)
+        if authenticated:
+            return AuthResponse(success=True, message="Authentication successful", score=score, authenticated=True)
+        else:
+            return AuthResponse(success=False, message=f"Voice verification failed (Score: {score:.3f})", score=score, authenticated=False)
+    finally:
+        if os.path.exists(temp_input_path):
+            os.remove(temp_input_path)
+        if os.path.exists(temp_output_path):
+            os.remove(temp_output_path)
 

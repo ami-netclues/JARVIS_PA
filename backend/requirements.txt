@@ -2,10 +2,19 @@ fastapi==0.115.8
 uvicorn[standard]==0.30.6
 python-multipart==0.0.9
 httpx==0.27.2
-pydantic==2.10.6
+pydantic==2.12.5
 pydantic-settings==2.7.1
 orjson==3.10.7
+numpy==2.4.2
+scipy==1.17.0
+requests==2.32.5
 
-# Optional transcription support (install only if you want /api/transcribe enabled)
+# Voice Authentication (Resemblyzer)
+Resemblyzer==0.1.4
+librosa==0.10.2.post1
+soundfile==0.13.1
+torch==2.10.0
+torchaudio==2.10.0
+
+# Optional transcription support
 # faster-whisper==1.0.3
-# torch==2.5.1
