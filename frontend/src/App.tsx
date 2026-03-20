@@ -11,7 +11,7 @@ type ChatMessage = {
 };
 
 const SILENCE_DELAY_MS = 1300;
-const SILENCE_THRESHOLD = 15;
+const SILENCE_THRESHOLD = 20;
 
 const REGISTRATION_TEXT = "The future of artificial intelligence lies in seamless integration between human intuition and machine precision. JARVIS is designed to be more than just a tool; it is a personalized assistant that understands your voice and adapts to your needs. By speaking this paragraph clearly, you are helping the system build a unique profile that ensures your interactions remain secure and truly yours.";
 
@@ -139,6 +139,11 @@ const App: React.FC = () => {
           audioChunksRef.current.push(event.data);
         }
       };
+
+      // Safari/iOS fix: AudioContext must be resumed on user interaction
+      if (audioContextRef.current && audioContextRef.current.state === "suspended") {
+        await audioContextRef.current.resume();
+      }
 
       mediaRecorder.onstop = () => {
         stream.getTracks().forEach((t) => t.stop());
@@ -371,15 +376,37 @@ const App: React.FC = () => {
     if (!("speechSynthesis" in window)) {
       return;
     }
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.onend = () => {
-      if (autoListenRef.current && !isRecordingRef.current) {
-        // Fire-and-forget; errors will be surfaced via startRecording handlers
-        void startRecording();
-      }
-    };
+
+    // Cancel any ongoing speech and clear the queue
     window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
+
+    // Use a small delay for Safari to ensure previous cancel completed
+    setTimeout(() => {
+      const utterance = new SpeechSynthesisUtterance(text);
+
+      // Safari requires voices to be explicitly set sometimes
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length > 0) {
+        // Prefer a good English voice if available, otherwise just use the first one
+        const preferredVoice = voices.find(v => v.lang.startsWith('en') && v.name.includes('Samantha')) ||
+          voices.find(v => v.lang.startsWith('en')) ||
+          voices[0];
+        utterance.voice = preferredVoice;
+      }
+
+      utterance.onend = () => {
+        if (autoListenRef.current && !isRecordingRef.current) {
+          // Fire-and-forget; errors will be surfaced via startRecording handlers
+          void startRecording();
+        }
+      };
+
+      utterance.onerror = (e) => {
+        console.error("SpeechSynthesis error:", e);
+      };
+
+      window.speechSynthesis.speak(utterance);
+    }, 50);
   };
 
   const renderAuthLanding = () => (
