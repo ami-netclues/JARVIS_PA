@@ -41,6 +41,66 @@ const App: React.FC = () => {
   const autoListenRef = useRef(true);
   const recognizedTextRef = useRef("");
 
+  const ttsUnlockedRef = useRef(false);
+  const keepAliveIntervalRef = useRef<number | null>(null);
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+
+  const unlockTTS = () => {
+    if (ttsUnlockedRef.current) return;
+    if (!("speechSynthesis" in window)) return;
+
+    // Only cancel if NOT currently speaking something important
+    if (!window.speechSynthesis.speaking) {
+      const utter = new SpeechSynthesisUtterance("");
+      window.speechSynthesis.speak(utter);
+      window.speechSynthesis.cancel();
+    }
+
+    ttsUnlockedRef.current = true;
+    keepAudioAlive();
+  };
+
+  const keepAudioAlive = () => {
+    if (keepAliveIntervalRef.current) return;
+    keepAliveIntervalRef.current = window.setInterval(() => {
+      if (!("speechSynthesis" in window)) return;
+      // CRITICAL: Do NOT cancel or speak if we are already speaking a real response
+      if (window.speechSynthesis.speaking) return;
+
+      const utter = new SpeechSynthesisUtterance("");
+      window.speechSynthesis.speak(utter);
+      window.speechSynthesis.cancel();
+    }, 10000);
+  };
+
+  useEffect(() => {
+    const handleInteraction = () => {
+      unlockTTS();
+      document.removeEventListener("click", handleInteraction);
+      document.removeEventListener("touchstart", handleInteraction);
+    };
+    document.addEventListener("click", handleInteraction);
+    document.addEventListener("touchstart", handleInteraction);
+    return () => {
+      document.removeEventListener("click", handleInteraction);
+      document.removeEventListener("touchstart", handleInteraction);
+      if (keepAliveIntervalRef.current) {
+        clearInterval(keepAliveIntervalRef.current);
+      }
+    };
+  }, []);
+
+  const waitForVoices = (): Promise<SpeechSynthesisVoice[]> => {
+    return new Promise(resolve => {
+      let voices = window.speechSynthesis.getVoices();
+      if (voices.length) return resolve(voices);
+
+      window.speechSynthesis.onvoiceschanged = () => {
+        resolve(window.speechSynthesis.getVoices());
+      };
+    });
+  };
+
   // Audio silence refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const animationFrameRef = useRef<number | null>(null);
@@ -123,6 +183,7 @@ const App: React.FC = () => {
   };
 
   const startRecording = async () => {
+    unlockTTS();
     if (isRecordingRef.current) return;
 
     setError(null);
@@ -335,8 +396,6 @@ const App: React.FC = () => {
   };
 
   const processAudioAndSend = async () => {
-    const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-
     let text = recognizedTextRef.current.trim();
 
     if (!text) {
@@ -348,6 +407,19 @@ const App: React.FC = () => {
       return;
     }
 
+    await sendMessage(text);
+  };
+
+  const handleTextSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!textInput.trim()) return;
+
+    const text = textInput.trim();
+    setTextInput("");
+    await sendMessage(text);
+  };
+
+  const sendMessage = async (text: string) => {
     setStatus("Sending to server...");
     setIsThinking(true);
     setMessages((prev) => [
@@ -383,41 +455,45 @@ const App: React.FC = () => {
     }
   };
 
-  const speakText = (text: string) => {
+  const speakText = async (text: string) => {
     if (!("speechSynthesis" in window)) {
       return;
     }
+    if (!text) return;
 
-    // Cancel any ongoing speech and clear the queue
-    window.speechSynthesis.cancel();
+    const voices = await waitForVoices();
+    const utterance = new SpeechSynthesisUtterance(text);
+    // Keep reference to prevent GC
+    utteranceRef.current = utterance;
 
-    // Use a small delay for Safari to ensure previous cancel completed
+    if (voices.length > 0) {
+      const preferredVoice = voices.find(v => v.lang.startsWith('en') && v.name.includes('Samantha')) ||
+        voices.find(v => v.lang.startsWith('en')) ||
+        voices[0];
+      utterance.voice = preferredVoice;
+    }
+
+    window.speechSynthesis.cancel(); // clear queue
+
+    // Re-introduce small delay for Safari
     setTimeout(() => {
-      const utterance = new SpeechSynthesisUtterance(text);
+      if (!utteranceRef.current) return;
 
-      // Safari requires voices to be explicitly set sometimes
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        // Prefer a good English voice if available, otherwise just use the first one
-        const preferredVoice = voices.find(v => v.lang.startsWith('en') && v.name.includes('Samantha')) ||
-          voices.find(v => v.lang.startsWith('en')) ||
-          voices[0];
-        utterance.voice = preferredVoice;
-      }
-
-      utterance.onend = () => {
+      utteranceRef.current.onend = () => {
+        utteranceRef.current = null;
         if (autoListenRef.current && !isRecordingRef.current) {
           // Fire-and-forget; errors will be surfaced via startRecording handlers
           void startRecording();
         }
       };
 
-      utterance.onerror = (e) => {
+      utteranceRef.current.onerror = (e) => {
         console.error("SpeechSynthesis error:", e);
+        utteranceRef.current = null;
       };
 
-      window.speechSynthesis.speak(utterance);
-    }, 50);
+      window.speechSynthesis.speak(utteranceRef.current);
+    }, 100);
   };
 
   const renderAuthLanding = () => (
@@ -779,6 +855,48 @@ const App: React.FC = () => {
                 <div ref={bottomRef} />
               </div>
             )}
+
+            {/* Text Chat Input */}
+            <form onSubmit={handleTextSubmit} style={{ display: 'flex', gap: '0.8rem', marginBottom: '1.5rem' }}>
+              <input
+                type="text"
+                placeholder="Type your message..."
+                value={textInput}
+                onChange={(e) => setTextInput(e.target.value)}
+                style={{
+                  flex: 1,
+                  padding: "0.8rem 1.2rem",
+                  borderRadius: "0.75rem",
+                  border: "1px solid rgba(148,163,184,0.2)",
+                  background: "rgba(15,23,42,0.6)",
+                  color: "white",
+                  fontSize: "1rem",
+                  outline: "none",
+                  transition: "border-color 0.2s",
+                }}
+                onFocus={(e) => e.target.style.borderColor = "rgba(96,165,250,0.5)"}
+                onBlur={(e) => e.target.style.borderColor = "rgba(148,163,184,0.2)"}
+              />
+              <button
+                type="submit"
+                style={{
+                  padding: "0.8rem 1.5rem",
+                  borderRadius: "0.75rem",
+                  border: "none",
+                  background: "linear-gradient(to right, #3b82f6, #2563eb)",
+                  color: "white",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                  fontSize: "1rem",
+                  boxShadow: "0 4px 12px rgba(37,99,235,0.2)",
+                  transition: "transform 0.1s",
+                }}
+                onMouseDown={(e) => e.currentTarget.style.transform = "scale(0.98)"}
+                onMouseUp={(e) => e.currentTarget.style.transform = "scale(1)"}
+              >
+                Send
+              </button>
+            </form>
 
             {/* Record Button and Auto listen checkbox*/}
             <div
