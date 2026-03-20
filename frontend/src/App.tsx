@@ -33,6 +33,7 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [autoListen, setAutoListen] = useState(true);
+  const [isThinking, setIsThinking] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -44,6 +45,8 @@ const App: React.FC = () => {
   const audioContextRef = useRef<AudioContext | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const silenceStartRef = useRef<number | null>(null);
+  // Track if user spoke during recording
+  const userSpokeRef = useRef(false);
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -128,6 +131,7 @@ const App: React.FC = () => {
     setRecognizedText("");
     recognizedTextRef.current = "";
     setStatus("Requesting microphone...");
+    userSpokeRef.current = false;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -176,6 +180,10 @@ const App: React.FC = () => {
             sum += dataArray[i];
           }
           const average = sum / bufferLength;
+
+          if (average > SILENCE_THRESHOLD) {
+            userSpokeRef.current = true;
+          }
 
           if (average < SILENCE_THRESHOLD) {
             if (!silenceStartRef.current) {
@@ -332,14 +340,16 @@ const App: React.FC = () => {
     let text = recognizedTextRef.current.trim();
 
     if (!text) {
-      // Optional: send audio to backend /api/transcribe if you enable it.
-      // For now we'll just show a message and not call that endpoint by default.
-      setError("No speech recognized. Please try again.");
+      // Only show error if user actually spoke during recording
+      if (userSpokeRef.current) {
+        setError("No speech recognized. Please try again.");
+      }
       setStatus("Idle");
       return;
     }
 
     setStatus("Sending to server...");
+    setIsThinking(true);
     setMessages((prev) => [
       ...prev,
       { id: Date.now(), role: "user", text },
@@ -364,11 +374,12 @@ const App: React.FC = () => {
         ...prev,
         { id: Date.now() + 1, role: "assistant", text: data.replyText },
       ]);
-
+      setIsThinking(false);
       speakText(data.replyText);
     } catch (e: any) {
       setError("Failed to call server: " + (e?.message ?? String(e)));
       setStatus("Error");
+      setIsThinking(false);
     }
   };
 
@@ -743,6 +754,28 @@ const App: React.FC = () => {
                     </div>
                   </div>
                 ))}
+                {isThinking && (
+                  <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: "0.5rem" }}>
+                    <div
+                      style={{
+                        padding: "0.6rem 0.9rem",
+                        borderRadius: "0.75rem",
+                        maxWidth: "80%",
+                        fontSize: "0.95rem",
+                        background: "#010409",
+                        color: "#e5e7eb",
+                        border: "1px solid rgba(56,189,248,0.4)",
+                        fontStyle: "italic",
+                        opacity: 0.85,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem"
+                      }}
+                    >
+                      <span role="img" aria-label="thinking">🤖</span> JARVIS is thinking...
+                    </div>
+                  </div>
+                )}
                 <div ref={bottomRef} />
               </div>
             )}
