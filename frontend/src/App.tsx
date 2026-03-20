@@ -184,7 +184,20 @@ const App: React.FC = () => {
     return Array.from(rawData);
   };
 
+  // const startRecording = async () => {
+  //   unlockTTS();
+  //   if (isRecordingRef.current) return;
   const startRecording = async () => {
+    // 🔥 STOP JARVIS SPEAKING IMMEDIATELY
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+      utteranceRef.current = null;
+    }
+
+    // 👇 OPTIONAL: disable auto listen when user interrupts manually
+    autoListenRef.current = false;
+    setAutoListen(false);
+
     unlockTTS();
     if (isRecordingRef.current) return;
 
@@ -582,7 +595,7 @@ const App: React.FC = () => {
       <br />
       <button
         onClick={() => {
-          if (adminPassword === "pass123") {
+          if (adminPassword === "J@rv!s#AI2026") {
             setAuthStep("ADMIN_PANEL");
             setAuthError("");
           } else {

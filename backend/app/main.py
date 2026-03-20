@@ -183,7 +183,7 @@ async def get_profiles():
 
 @app.delete("/api/auth/profiles/{name}", response_model=AuthResponse)
 async def delete_profile(name: str, password: str = ""):
-    if password != "pass123":
+    if password != "J@rv!s#AI2026":
         return AuthResponse(success=False, message="Invalid admin password")
     
     success = auth_manager.delete_profile(name)
@@ -195,7 +195,7 @@ async def delete_profile(name: str, password: str = ""):
 
 @app.post("/api/auth/register", response_model=AuthResponse)
 async def register(file: UploadFile = File(...), user_id: str = Form(...), password: str = Form(default="")):
-    if password != "pass123":
+    if password != "J@rv!s#AI2026":
         return AuthResponse(success=False, message="Invalid admin password")
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".upload") as temp_input:
