@@ -33,6 +33,7 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [autoListen, setAutoListen] = useState(true);
+  const [textInput, setTextInput] = useState("");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -388,18 +389,27 @@ const App: React.FC = () => {
   };
 
   const processAudioAndSend = async () => {
-    const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-
     let text = recognizedTextRef.current.trim();
 
     if (!text) {
-      // Optional: send audio to backend /api/transcribe if you enable it.
-      // For now we'll just show a message and not call that endpoint by default.
       setError("No speech recognized. Please try again.");
       setStatus("Idle");
       return;
     }
 
+    await sendMessage(text);
+  };
+
+  const handleTextSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!textInput.trim()) return;
+
+    const text = textInput.trim();
+    setTextInput("");
+    await sendMessage(text);
+  };
+
+  const sendMessage = async (text: string) => {
     setStatus("Sending to server...");
     setMessages((prev) => [
       ...prev,
@@ -811,6 +821,48 @@ const App: React.FC = () => {
                 <div ref={bottomRef} />
               </div>
             )}
+
+            {/* Text Chat Input */}
+            <form onSubmit={handleTextSubmit} style={{ display: 'flex', gap: '0.8rem', marginBottom: '1.5rem' }}>
+              <input
+                type="text"
+                placeholder="Type your message..."
+                value={textInput}
+                onChange={(e) => setTextInput(e.target.value)}
+                style={{
+                  flex: 1,
+                  padding: "0.8rem 1.2rem",
+                  borderRadius: "0.75rem",
+                  border: "1px solid rgba(148,163,184,0.2)",
+                  background: "rgba(15,23,42,0.6)",
+                  color: "white",
+                  fontSize: "1rem",
+                  outline: "none",
+                  transition: "border-color 0.2s",
+                }}
+                onFocus={(e) => e.target.style.borderColor = "rgba(96,165,250,0.5)"}
+                onBlur={(e) => e.target.style.borderColor = "rgba(148,163,184,0.2)"}
+              />
+              <button
+                type="submit"
+                style={{
+                  padding: "0.8rem 1.5rem",
+                  borderRadius: "0.75rem",
+                  border: "none",
+                  background: "linear-gradient(to right, #3b82f6, #2563eb)",
+                  color: "white",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                  fontSize: "1rem",
+                  boxShadow: "0 4px 12px rgba(37,99,235,0.2)",
+                  transition: "transform 0.1s",
+                }}
+                onMouseDown={(e) => e.currentTarget.style.transform = "scale(0.98)"}
+                onMouseUp={(e) => e.currentTarget.style.transform = "scale(1)"}
+              >
+                Send
+              </button>
+            </form>
 
             {/* Record Button and Auto listen checkbox*/}
             <div
