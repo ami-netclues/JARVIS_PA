@@ -34,6 +34,8 @@ const App: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [autoListen, setAutoListen] = useState(true);
   const [isThinking, setIsThinking] = useState(false);
+  const [textInput, setTextInput] = useState("");
+
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
