@@ -582,19 +582,9 @@ const App: React.FC = () => {
   const renderAdminPwd = () => (
     <div style={{ textAlign: "center", padding: "2rem" }}>
       <h2 style={{ marginBottom: "1.5rem" }}>Admin Access</h2>
-      <input
-        type="password"
-        placeholder="Enter Admin Password"
-        value={adminPassword}
-        onChange={(e) => setAdminPassword(e.target.value)}
-        style={{
-          padding: "0.75rem 1rem", borderRadius: "0.5rem", border: "1px solid #334155",
-          background: "#0f172a", color: "white", marginBottom: "1rem", width: "100%", maxWidth: 300
-        }}
-      />
-      <br />
-      <button
-        onClick={() => {
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
           if (adminPassword === "J@rv!s#AI2026") {
             setAuthStep("ADMIN_PANEL");
             setAuthError("");
@@ -602,13 +592,28 @@ const App: React.FC = () => {
             setAuthError("Wrong password");
           }
         }}
-        style={{
-          padding: "0.75rem 2rem", borderRadius: "0.5rem", border: "none",
-          background: "#3b82f6", color: "white", cursor: "pointer", fontWeight: 600
-        }}
       >
-        Unlock
-      </button>
+        <input
+          type="password"
+          placeholder="Enter Admin Password"
+          value={adminPassword}
+          onChange={(e) => setAdminPassword(e.target.value)}
+          style={{
+            padding: "0.75rem 1rem", borderRadius: "0.5rem", border: "1px solid #334155",
+            background: "#0f172a", color: "white", marginBottom: "1rem", width: "100%", maxWidth: 300
+          }}
+        />
+        <br />
+        <button
+          type="submit"
+          style={{
+            padding: "0.75rem 2rem", borderRadius: "0.5rem", border: "none",
+            background: "#3b82f6", color: "white", cursor: "pointer", fontWeight: 600
+          }}
+        >
+          Unlock
+        </button>
+      </form>
       {authError && <p style={{ color: "#ef4444", marginTop: "1rem" }}>{authError}</p>}
       <br />
       <button onClick={() => setAuthStep("LANDING")} style={{ marginTop: "1rem", background: "none", border: "none", color: "#94a3b8", cursor: "pointer" }}>Cancel</button>
@@ -624,27 +629,34 @@ const App: React.FC = () => {
 
       <div style={{ background: "rgba(30,41,59,0.3)", padding: "1.5rem", borderRadius: "1rem", border: "1px solid rgba(148,163,184,0.1)", marginBottom: "2rem" }}>
         <h3 style={{ marginTop: 0, fontSize: "1rem", color: "#60a5fa" }}>Add New Profile</h3>
-        <input
-          placeholder="Person Name"
-          value={regName}
-          onChange={(e) => setRegName(e.target.value)}
-          style={{
-            padding: "0.6rem 1rem", borderRadius: "0.5rem", border: "1px solid #334155",
-            background: "#0f172a", color: "white", marginBottom: "1rem", width: "100%", maxWidth: 300
-          }}
-        />
-        <br />
-        <button
-          onClick={() => { if (regName.trim()) setAuthStep("REGISTERING"); }}
-          disabled={availableProfiles.length >= 10 || !regName.trim()}
-          style={{
-            padding: "0.6rem 1.5rem", borderRadius: "0.5rem", border: "none",
-            background: "#22c55e", color: "white", cursor: "pointer", fontWeight: 600,
-            opacity: (availableProfiles.length >= 10 || !regName.trim()) ? 0.5 : 1
-          }}
-        >
-          Begin Registration
-        </button>
+        <form onSubmit={(e) => {
+          e.preventDefault();
+          if (regName.trim() && availableProfiles.length < 10) {
+            setAuthStep("REGISTERING");
+          }
+        }}>
+          <input
+            placeholder="Person Name"
+            value={regName}
+            onChange={(e) => setRegName(e.target.value)}
+            style={{
+              padding: "0.6rem 1rem", borderRadius: "0.5rem", border: "1px solid #334155",
+              background: "#0f172a", color: "white", marginBottom: "1rem", width: "100%", maxWidth: 300
+            }}
+          />
+          <br />
+          <button
+            type="submit"
+            disabled={availableProfiles.length >= 10 || !regName.trim()}
+            style={{
+              padding: "0.6rem 1.5rem", borderRadius: "0.5rem", border: "none",
+              background: "#22c55e", color: "white", cursor: "pointer", fontWeight: 600,
+              opacity: (availableProfiles.length >= 10 || !regName.trim()) ? 0.5 : 1
+            }}
+          >
+            Begin Registration
+          </button>
+        </form>
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
