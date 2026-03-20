@@ -12,6 +12,7 @@ type ChatMessage = {
 
 const SILENCE_DELAY_MS = 1300;
 const SILENCE_THRESHOLD = 20;
+const AUTH_EXPIRY_MS = 30 * 60 * 1000; // 30 minutes
 
 const REGISTRATION_TEXT = "The future of artificial intelligence lies in seamless integration between human intuition and machine precision. JARVIS is designed to be more than just a tool; it is a personalized assistant that understands your voice and adapts to your needs. By speaking this paragraph clearly, you are helping the system build a unique profile that ensures your interactions remain secure and truly yours.";
 
@@ -25,6 +26,7 @@ const App: React.FC = () => {
   const [regName, setRegName] = useState("");
   const [authError, setAuthError] = useState("");
   const [isVerifying, setIsVerifying] = useState(false);
+  const [lastAuthTime, setLastAuthTime] = useState<number | null>(null);
 
   const [isRecording, setIsRecording] = useState(false);
   const [recognizedText, setRecognizedText] = useState("");
@@ -348,6 +350,7 @@ const App: React.FC = () => {
       const data = await res.json();
       if (data.success) {
         setAuthStep("CHAT");
+        setLastAuthTime(Date.now());
         setAuthError("");
         setStatus(`Authenticated (Score: ${data.score?.toFixed(3)})`);
       } else {
@@ -414,12 +417,44 @@ const App: React.FC = () => {
     let text = recognizedTextRef.current.trim();
 
     if (!text) {
-      // Only show error if user actually spoke during recording
       if (userSpokeRef.current) {
         setError("No speech recognized. Please try again.");
       }
       setStatus("Idle");
       return;
+    }
+
+    // Check if re-authentication is needed (30 min expiry)
+    if (lastAuthTime && (Date.now() - lastAuthTime > AUTH_EXPIRY_MS)) {
+      setStatus("Re-verifying identity...");
+      setIsThinking(true);
+      try {
+        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        const formData = new FormData();
+        formData.append("file", audioBlob, "audio.webm");
+        formData.append("user_id", selectedProfile);
+
+        const res = await fetch("/api/auth/verify", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          setLastAuthTime(Date.now());
+          setStatus(`Identity verified (Score: ${data.score?.toFixed(3)})`);
+          // Proceed to send message
+        } else {
+          setError("You are not authorised person");
+          setStatus("Authentication failed");
+          setIsThinking(false);
+          return; // Stop here
+        }
+      } catch (e: any) {
+        setError("Verification error: " + (e.message || String(e)));
+        setIsThinking(false);
+        return;
+      }
     }
 
     await sendMessage(text);
@@ -428,6 +463,11 @@ const App: React.FC = () => {
   const handleTextSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!textInput.trim()) return;
+
+    if (lastAuthTime && (Date.now() - lastAuthTime > AUTH_EXPIRY_MS)) {
+      setError("Session expired. Please use voice to re-verify your identity.");
+      return;
+    }
 
     const text = textInput.trim();
     setTextInput("");
