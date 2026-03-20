@@ -40,6 +40,66 @@ const App: React.FC = () => {
   const autoListenRef = useRef(true);
   const recognizedTextRef = useRef("");
 
+  const ttsUnlockedRef = useRef(false);
+  const keepAliveIntervalRef = useRef<number | null>(null);
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+
+  const unlockTTS = () => {
+    if (ttsUnlockedRef.current) return;
+    if (!("speechSynthesis" in window)) return;
+
+    // Only cancel if NOT currently speaking something important
+    if (!window.speechSynthesis.speaking) {
+      const utter = new SpeechSynthesisUtterance("");
+      window.speechSynthesis.speak(utter);
+      window.speechSynthesis.cancel();
+    }
+
+    ttsUnlockedRef.current = true;
+    keepAudioAlive();
+  };
+
+  const keepAudioAlive = () => {
+    if (keepAliveIntervalRef.current) return;
+    keepAliveIntervalRef.current = window.setInterval(() => {
+      if (!("speechSynthesis" in window)) return;
+      // CRITICAL: Do NOT cancel or speak if we are already speaking a real response
+      if (window.speechSynthesis.speaking) return;
+
+      const utter = new SpeechSynthesisUtterance("");
+      window.speechSynthesis.speak(utter);
+      window.speechSynthesis.cancel();
+    }, 10000);
+  };
+
+  useEffect(() => {
+    const handleInteraction = () => {
+      unlockTTS();
+      document.removeEventListener("click", handleInteraction);
+      document.removeEventListener("touchstart", handleInteraction);
+    };
+    document.addEventListener("click", handleInteraction);
+    document.addEventListener("touchstart", handleInteraction);
+    return () => {
+      document.removeEventListener("click", handleInteraction);
+      document.removeEventListener("touchstart", handleInteraction);
+      if (keepAliveIntervalRef.current) {
+        clearInterval(keepAliveIntervalRef.current);
+      }
+    };
+  }, []);
+
+  const waitForVoices = (): Promise<SpeechSynthesisVoice[]> => {
+    return new Promise(resolve => {
+      let voices = window.speechSynthesis.getVoices();
+      if (voices.length) return resolve(voices);
+
+      window.speechSynthesis.onvoiceschanged = () => {
+        resolve(window.speechSynthesis.getVoices());
+      };
+    });
+  };
+
   // Audio silence refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const animationFrameRef = useRef<number | null>(null);
@@ -120,6 +180,7 @@ const App: React.FC = () => {
   };
 
   const startRecording = async () => {
+    unlockTTS();
     if (isRecordingRef.current) return;
 
     setError(null);
@@ -372,41 +433,45 @@ const App: React.FC = () => {
     }
   };
 
-  const speakText = (text: string) => {
+  const speakText = async (text: string) => {
     if (!("speechSynthesis" in window)) {
       return;
     }
+    if (!text) return;
 
-    // Cancel any ongoing speech and clear the queue
-    window.speechSynthesis.cancel();
+    const voices = await waitForVoices();
+    const utterance = new SpeechSynthesisUtterance(text);
+    // Keep reference to prevent GC
+    utteranceRef.current = utterance;
 
-    // Use a small delay for Safari to ensure previous cancel completed
+    if (voices.length > 0) {
+      const preferredVoice = voices.find(v => v.lang.startsWith('en') && v.name.includes('Samantha')) ||
+        voices.find(v => v.lang.startsWith('en')) ||
+        voices[0];
+      utterance.voice = preferredVoice;
+    }
+
+    window.speechSynthesis.cancel(); // clear queue
+
+    // Re-introduce small delay for Safari
     setTimeout(() => {
-      const utterance = new SpeechSynthesisUtterance(text);
+      if (!utteranceRef.current) return;
 
-      // Safari requires voices to be explicitly set sometimes
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        // Prefer a good English voice if available, otherwise just use the first one
-        const preferredVoice = voices.find(v => v.lang.startsWith('en') && v.name.includes('Samantha')) ||
-          voices.find(v => v.lang.startsWith('en')) ||
-          voices[0];
-        utterance.voice = preferredVoice;
-      }
-
-      utterance.onend = () => {
+      utteranceRef.current.onend = () => {
+        utteranceRef.current = null;
         if (autoListenRef.current && !isRecordingRef.current) {
           // Fire-and-forget; errors will be surfaced via startRecording handlers
           void startRecording();
         }
       };
 
-      utterance.onerror = (e) => {
+      utteranceRef.current.onerror = (e) => {
         console.error("SpeechSynthesis error:", e);
+        utteranceRef.current = null;
       };
 
-      window.speechSynthesis.speak(utterance);
-    }, 50);
+      window.speechSynthesis.speak(utteranceRef.current);
+    }, 100);
   };
 
   const renderAuthLanding = () => (
