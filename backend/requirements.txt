@@ -18,3 +18,4 @@ torchaudio==2.10.0
 
 # Optional transcription support
 # faster-whisper==1.0.3
+edge-tts
