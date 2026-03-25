@@ -48,6 +48,27 @@ const App: React.FC = () => {
   const ttsUnlockedRef = useRef(false);
   const keepAliveIntervalRef = useRef<number | null>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const autoListenTimeoutRef = useRef<any>(null);
+
+  const stopAllAudio = async () => {
+    if (autoListenTimeoutRef.current) {
+      clearTimeout(autoListenTimeoutRef.current);
+      autoListenTimeoutRef.current = null;
+    }
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+      utteranceRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      try {
+        await audioCtxRef.current.close();
+      } catch (e) {
+        // ignore
+      }
+      audioCtxRef.current = null;
+      scheduledTimeRef.current = 0;
+    }
+  };
 
   const unlockTTS = () => {
     if (ttsUnlockedRef.current) return;
@@ -157,12 +178,15 @@ const App: React.FC = () => {
   }, []);
 
   const fetchProfiles = async () => {
+    console.log("[DEBUG] Fetching profiles...");
     try {
       const res = await fetch("/api/auth/profiles");
+      console.log("[DEBUG] Profiles response status:", res.status);
       const data = await res.json();
+      console.log("[DEBUG] Profiles data:", data);
       setAvailableProfiles(data.profiles || []);
     } catch (e) {
-      console.error("Failed to fetch profiles", e);
+      console.error("[DEBUG] Failed to fetch profiles", e);
     }
   };
 
@@ -190,15 +214,14 @@ const App: React.FC = () => {
   //   unlockTTS();
   //   if (isRecordingRef.current) return;
   const startRecording = async () => {
+    console.log("[DEBUG] Starting recording...");
+    console.log("[DEBUG] Media recorder state:", mediaRecorderRef.current?.state);
+    
     // 🔥 STOP JARVIS SPEAKING IMMEDIATELY
-    if ("speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-      utteranceRef.current = null;
-    }
+    await stopAllAudio();
 
-    // 👇 OPTIONAL: disable auto listen when user interrupts manually
-    autoListenRef.current = false;
-    setAutoListen(false);
+    // autoListenRef.current should NOT be set to false here, 
+    // to allow the "Auto listen after reply" loop to continue.
 
     unlockTTS();
     if (isRecordingRef.current) return;
@@ -296,6 +319,9 @@ const App: React.FC = () => {
   };
 
   const stopRecording = async () => {
+    console.log("[DEBUG] Stopping recording...");
+    console.log("[DEBUG] Media recorder state:", mediaRecorderRef.current?.state);
+    
     if (!mediaRecorderRef.current) return;
 
     // Clean up silence detection
@@ -324,6 +350,9 @@ const App: React.FC = () => {
 
     // Wait a tiny bit to ensure dataavailable fired
     setTimeout(() => {
+      console.log("[DEBUG] Audio chunks after recording:", audioChunksRef.current.length);
+      console.log("[DEBUG] Auth step:", authStep);
+      
       if (authStep === "CHAT") {
         processAudioAndSend();
       } else if (authStep === "VERIFYING") {
@@ -335,30 +364,47 @@ const App: React.FC = () => {
   };
 
   const handleVoiceVerify = async () => {
+    console.log("[DEBUG] Voice verification started");
+    console.log("[DEBUG] Selected profile:", selectedProfile);
+    console.log("[DEBUG] Audio chunks count:", audioChunksRef.current.length);
+    
     setIsVerifying(true);
     setStatus("Verifying voice...");
     try {
       const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+      console.log("[DEBUG] Audio blob size:", audioBlob.size, "bytes");
+      
       const formData = new FormData();
       formData.append("file", audioBlob, "audio.webm");
       formData.append("user_id", selectedProfile);
-
+      
+      console.log("[DEBUG] Sending verification request to /api/auth/verify");
       const res = await fetch("/api/auth/verify", {
         method: "POST",
         body: formData,
       });
+      
+      console.log("[DEBUG] Response status:", res.status);
+      console.log("[DEBUG] Response headers:", Object.fromEntries(res.headers.entries()));
+      
       const data = await res.json();
+      console.log("[DEBUG] Response data:", data);
+      
       if (data.success) {
+        console.log("[DEBUG] Verification successful");
         setAuthStep("CHAT");
         setLastAuthTime(Date.now());
         setAuthError("");
         setStatus(`Authenticated (Score: ${data.score?.toFixed(3)})`);
       } else {
+        console.log("[DEBUG] Verification failed:", data.message);
         setAuthError(data.message || "Voice match failed.");
         setStatus(`Mismatch (Score: ${data.score?.toFixed(3)})`);
         setAuthStep("LANDING");
       }
     } catch (e: any) {
+      console.error("[DEBUG] Voice verification error:", e);
+      console.error("[DEBUG] Error stack:", e.stack);
       setAuthError("Auth error: " + (e.message || String(e)));
       setAuthStep("LANDING");
     } finally {
@@ -367,28 +413,45 @@ const App: React.FC = () => {
   };
 
   const handleVoiceRegister = async () => {
+    console.log("[DEBUG] Voice registration started");
+    console.log("[DEBUG] Registration name:", regName);
+    console.log("[DEBUG] Audio chunks count:", audioChunksRef.current.length);
+    
     setIsVerifying(true);
     setStatus("Processing registration...");
     try {
       const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+      console.log("[DEBUG] Audio blob size:", audioBlob.size, "bytes");
+      
       const formData = new FormData();
       formData.append("file", audioBlob, "audio.webm");
       formData.append("user_id", regName);
       formData.append("password", adminPassword);
-
+      
+      console.log("[DEBUG] Sending registration request to /api/auth/register");
       const res = await fetch("/api/auth/register", {
         method: "POST",
         body: formData,
       });
+      
+      console.log("[DEBUG] Response status:", res.status);
+      console.log("[DEBUG] Response headers:", Object.fromEntries(res.headers.entries()));
+      
       const data = await res.json();
+      console.log("[DEBUG] Response data:", data);
+      
       if (data.success) {
+        console.log("[DEBUG] Registration successful");
         await fetchProfiles();
         setAuthStep("ADMIN_PANEL");
         setStatus("Registered successfully");
       } else {
+        console.log("[DEBUG] Registration failed:", data.message);
         setAuthError(data.message || "Registration failed.");
       }
     } catch (e: any) {
+      console.error("[DEBUG] Voice registration error:", e);
+      console.error("[DEBUG] Error stack:", e.stack);
       setAuthError("Registration error: " + (e.message || String(e)));
     } finally {
       setIsVerifying(false);
@@ -460,95 +523,99 @@ const App: React.FC = () => {
     await sendMessage(text);
   };
 
-  const handleTextSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!textInput.trim()) return;
+  // --- TTS WebSocket Streaming ---
+  const [ttsSocket, setTtsSocket] = useState<WebSocket | null>(null);
+  const scheduledTimeRef = useRef(0);
+  const audioCtxRef = useRef<AudioContext | null>(null);
 
-    if (lastAuthTime && (Date.now() - lastAuthTime > AUTH_EXPIRY_MS)) {
-      setError("Session expired. Please use voice to re-verify your identity.");
-      return;
+  const initAudio = () => {
+    if (!audioCtxRef.current) {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      audioCtxRef.current = new AudioCtx();
     }
-
-    const text = textInput.trim();
-    setTextInput("");
-    await sendMessage(text);
   };
 
-  const sendMessage = async (text: string) => {
-    setStatus("Sending to server...");
-    setIsThinking(true);
-    setMessages((prev) => [
-      ...prev,
-      { id: Date.now(), role: "user", text },
-    ]);
+  const connectTTSWebSocket = () => {
+    if (ttsSocket) return;
+    // Use backend port 8001 for TTS WebSocket
+    const ws = new WebSocket("ws://jarvis.netcluesdemo.com/ws/tts");
+    setTtsSocket(ws);
 
-    try {
-      const res = await fetch("/api/message", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
-      });
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => {
+      setStatus("Connected to TTS server");
+    };
+    ws.onclose = () => {
+      setStatus("TTS connection closed");
+      setTtsSocket(null);
+    };
+    ws.onerror = (e) => {
+      setStatus("TTS connection error");
+      setTtsSocket(null);
+    };
 
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Server error ${res.status}: ${body}`);
+    ws.onmessage = async (event) => {
+      initAudio();
+      if (typeof event.data === "string") {
+        // JSON text reply
+        try {
+          const obj = JSON.parse(event.data);
+          if (obj.text) {
+            setReplyText(obj.text);
+            // Add the assistant's reply to chat immediately
+            setMessages((prev) => [
+              ...prev,
+              { id: Date.now() + 1, role: "assistant", text: obj.text },
+            ]);
+            console.log("[TTS] Received reply text:", obj.text);
+          }
+        } catch { }
+        return;
       }
-
-      const data = (await res.json()) as MessageResponse;
-      setReplyText(data.replyText);
-      setStatus("Success");
-      setMessages((prev) => [
-        ...prev,
-        { id: Date.now() + 1, role: "assistant", text: data.replyText },
-      ]);
-      setIsThinking(false);
-      speakText(data.replyText);
-    } catch (e: any) {
-      setError("Failed to call server: " + (e?.message ?? String(e)));
-      setStatus("Error");
-      setIsThinking(false);
-    }
+      // Binary audio chunk (MP3)
+      const chunk = event.data;
+      try {
+        const audioCtx = audioCtxRef.current!;
+        const arrayBuffer = chunk instanceof ArrayBuffer ? chunk : await chunk.arrayBuffer();
+        const decodedData = await audioCtx.decodeAudioData(arrayBuffer);
+        const source = audioCtx.createBufferSource();
+        source.buffer = decodedData;
+        source.connect(audioCtx.destination);
+        const now = audioCtx.currentTime;
+        if (scheduledTimeRef.current < now) {
+          scheduledTimeRef.current = now + 0.1;
+        }
+        source.start(scheduledTimeRef.current);
+        scheduledTimeRef.current += decodedData.duration;
+        setStatus("Speaking fluently...");
+        // Auto-listen after reply if enabled
+        source.onended = () => {
+          if (autoListenTimeoutRef.current) clearTimeout(autoListenTimeoutRef.current);
+          autoListenTimeoutRef.current = setTimeout(() => {
+            setStatus("Idle");
+            if (autoListenRef.current && !isRecordingRef.current) {
+              void startRecording();
+            }
+          }, 400); // Small delay to avoid overlap
+        };
+      } catch (e) {
+        // Ignore small MP3 header errors mid-stream
+        console.log("[TTS] Syncing stream or decode error:", e);
+      }
+    };
   };
 
-  const speakText = async (text: string) => {
-    if (!("speechSynthesis" in window)) {
-      return;
-    }
-    if (!text) return;
-
-    const voices = await waitForVoices();
-    const utterance = new SpeechSynthesisUtterance(text);
-    // Keep reference to prevent GC
-    utteranceRef.current = utterance;
-
-    if (voices.length > 0) {
-      const preferredVoice = voices.find(v => v.lang.startsWith('en') && v.name.includes('Samantha')) ||
-        voices.find(v => v.lang.startsWith('en')) ||
-        voices[0];
-      utterance.voice = preferredVoice;
-    }
-
-    window.speechSynthesis.cancel(); // clear queue
-
-    // Re-introduce small delay for Safari
-    setTimeout(() => {
-      if (!utteranceRef.current) return;
-
-      utteranceRef.current.onend = () => {
-        utteranceRef.current = null;
-        if (autoListenRef.current && !isRecordingRef.current) {
-          // Fire-and-forget; errors will be surfaced via startRecording handlers
-          void startRecording();
+  const sendTTS = (text: string) => {
+    if (!ttsSocket || ttsSocket.readyState !== WebSocket.OPEN) {
+      connectTTSWebSocket();
+      setTimeout(() => {
+        if (ttsSocket && ttsSocket.readyState === WebSocket.OPEN) {
+          ttsSocket.send(text);
         }
-      };
-
-      utteranceRef.current.onerror = (e) => {
-        console.error("SpeechSynthesis error:", e);
-        utteranceRef.current = null;
-      };
-
-      window.speechSynthesis.speak(utteranceRef.current);
-    }, 100);
+      }, 500);
+    } else {
+      ttsSocket.send(text);
+    }
   };
 
   const renderAuthLanding = () => (
@@ -750,6 +817,53 @@ const App: React.FC = () => {
       </div>
     </div>
   );
+
+  // --- TTS WebSocket Streaming ---
+  useEffect(() => {
+    connectTTSWebSocket();
+    return () => {
+      if (ttsSocket) {
+        ttsSocket.close();
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Refactored sendMessage to use TTS WebSocket
+  const sendMessage = async (text: string) => {
+    setStatus("Sending to server...");
+    setIsThinking(true);
+    setMessages((prev) => [
+      ...prev,
+      { id: Date.now(), role: "user", text },
+    ]);
+    setReplyText("");
+    // Send user message directly to TTS WebSocket
+    if (!ttsSocket || ttsSocket.readyState !== WebSocket.OPEN) {
+      connectTTSWebSocket();
+      setTimeout(() => {
+        if (ttsSocket && ttsSocket.readyState === WebSocket.OPEN) {
+          ttsSocket.send(text);
+        }
+      }, 500);
+    } else {
+      ttsSocket.send(text);
+    }
+    setIsThinking(false);
+  };
+
+  // Update handleTextSubmit to use new sendMessage
+  const handleTextSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!textInput.trim()) return;
+    if (lastAuthTime && (Date.now() - lastAuthTime > AUTH_EXPIRY_MS)) {
+      setError("Session expired. Please use voice to re-verify your identity.");
+      return;
+    }
+    const text = textInput.trim();
+    setTextInput("");
+    await sendMessage(text);
+  };
 
   return (
     <div
