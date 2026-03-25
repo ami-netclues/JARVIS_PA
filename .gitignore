@@ -3,3 +3,4 @@
 /frontend/dist
 /frontend/dist
 backend/app.log
+frontend/dist/index.html
