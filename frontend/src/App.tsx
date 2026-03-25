@@ -18,6 +18,14 @@ const REGISTRATION_TEXT = "The future of artificial intelligence lies in seamles
 
 type AuthStep = "LANDING" | "VERIFYING" | "ADMIN_PWD" | "ADMIN_PANEL" | "REGISTERING" | "CHAT";
 
+const THINKING_SENTENCES = [
+  "JARVIS is processing your request...",
+  "Analyzing voice signature and context...",
+  "Retrieving internal knowledge modules...",
+  "Synthesizing response components...",
+  "Optimizing neural pathways for output..."
+];
+
 const App: React.FC = () => {
   const [authStep, setAuthStep] = useState<AuthStep>("LANDING");
   const [availableProfiles, setAvailableProfiles] = useState<string[]>([]);
@@ -37,6 +45,11 @@ const App: React.FC = () => {
   const [autoListen, setAutoListen] = useState(true);
   const [isThinking, setIsThinking] = useState(false);
   const [textInput, setTextInput] = useState("");
+  const [thinkingSentenceIndex, setThinkingSentenceIndex] = useState(0);
+
+  const pendingTextMessageRef = useRef<string | null>(null);
+  const textTimeoutRef = useRef<any>(null);
+  const textDisplayedRef = useRef(false);
 
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -177,10 +190,41 @@ const App: React.FC = () => {
     fetchProfiles();
   }, []);
 
+  useEffect(() => {
+    let interval: any;
+    if (isThinking) {
+      interval = setInterval(() => {
+        setThinkingSentenceIndex((prev) => (prev + 1) % THINKING_SENTENCES.length);
+      }, 2500);
+    } else {
+      setThinkingSentenceIndex(0);
+    }
+    return () => clearInterval(interval);
+  }, [isThinking]);
+
+  const displayPendingText = () => {
+    if (textDisplayedRef.current) return;
+    if (pendingTextMessageRef.current) {
+      const text = pendingTextMessageRef.current;
+      setMessages((prev) => [
+        ...prev,
+        { id: Date.now() + 1, role: "assistant", text },
+      ]);
+      setReplyText(text);
+      textDisplayedRef.current = true;
+      pendingTextMessageRef.current = null;
+      if (textTimeoutRef.current) {
+        clearTimeout(textTimeoutRef.current);
+        textTimeoutRef.current = null;
+      }
+      setIsThinking(false);
+    }
+  };
+
   const fetchProfiles = async () => {
     console.log("[DEBUG] Fetching profiles...");
     try {
-      const res = await fetch("/api/auth/profiles");
+      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/auth/profiles`);
       console.log("[DEBUG] Profiles response status:", res.status);
       const data = await res.json();
       console.log("[DEBUG] Profiles data:", data);
@@ -379,7 +423,7 @@ const App: React.FC = () => {
       formData.append("user_id", selectedProfile);
       
       console.log("[DEBUG] Sending verification request to /api/auth/verify");
-      const res = await fetch("/api/auth/verify", {
+      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/auth/verify`, {
         method: "POST",
         body: formData,
       });
@@ -429,7 +473,7 @@ const App: React.FC = () => {
       formData.append("password", adminPassword);
       
       console.log("[DEBUG] Sending registration request to /api/auth/register");
-      const res = await fetch("/api/auth/register", {
+      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/auth/register`, {
         method: "POST",
         body: formData,
       });
@@ -462,7 +506,7 @@ const App: React.FC = () => {
     if (!window.confirm(`Are you sure you want to delete profile "${name}"?`)) return;
 
     try {
-      const res = await fetch(`/api/auth/profiles/${encodeURIComponent(name)}?password=${encodeURIComponent(adminPassword)}`, {
+      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/auth/profiles/${encodeURIComponent(name)}?password=${encodeURIComponent(adminPassword)}`, {
         method: "DELETE"
       });
       const data = await res.json();
@@ -497,7 +541,7 @@ const App: React.FC = () => {
         formData.append("file", audioBlob, "audio.webm");
         formData.append("user_id", selectedProfile);
 
-        const res = await fetch("/api/auth/verify", {
+        const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/auth/verify`, {
           method: "POST",
           body: formData,
         });
@@ -538,7 +582,7 @@ const App: React.FC = () => {
   const connectTTSWebSocket = () => {
     if (ttsSocket) return;
     // Use backend port 8001 for TTS WebSocket
-    const ws = new WebSocket("ws://jarvis.netcluesdemo.com/ws/tts");
+    const ws = new WebSocket(import.meta.env.VITE_WS_BASE_URL);
     setTtsSocket(ws);
 
     ws.binaryType = "arraybuffer";
@@ -561,13 +605,15 @@ const App: React.FC = () => {
         try {
           const obj = JSON.parse(event.data);
           if (obj.text) {
-            setReplyText(obj.text);
-            // Add the assistant's reply to chat immediately
-            setMessages((prev) => [
-              ...prev,
-              { id: Date.now() + 1, role: "assistant", text: obj.text },
-            ]);
             console.log("[TTS] Received reply text:", obj.text);
+            pendingTextMessageRef.current = obj.text;
+            textDisplayedRef.current = false;
+            // Clear existing timeout if any
+            if (textTimeoutRef.current) clearTimeout(textTimeoutRef.current);
+            // Set 2s fallback
+            textTimeoutRef.current = setTimeout(() => {
+              displayPendingText();
+            }, 2000);
           }
         } catch { }
         return;
@@ -581,10 +627,23 @@ const App: React.FC = () => {
         const source = audioCtx.createBufferSource();
         source.buffer = decodedData;
         source.connect(audioCtx.destination);
+
         const now = audioCtx.currentTime;
         if (scheduledTimeRef.current < now) {
           scheduledTimeRef.current = now + 0.1;
+
+          // For the very first chunk of a response, delay text display 
+          // to match the scheduled audio start time.
+          const delayMs = Math.max(0, (scheduledTimeRef.current - now) * 1000);
+          setTimeout(() => {
+            displayPendingText();
+          }, delayMs);
+        } else {
+          // If already playing/scheduled, just ensure text is shown 
+          // (should have been shown by first chunk anyway)
+          displayPendingText();
         }
+
         source.start(scheduledTimeRef.current);
         scheduledTimeRef.current += decodedData.duration;
         setStatus("Speaking fluently...");
@@ -849,7 +908,6 @@ const App: React.FC = () => {
     } else {
       ttsSocket.send(text);
     }
-    setIsThinking(false);
   };
 
   // Update handleTextSubmit to use new sendMessage
@@ -1029,7 +1087,7 @@ const App: React.FC = () => {
                         gap: "0.5rem"
                       }}
                     >
-                      <span role="img" aria-label="thinking">🤖</span> JARVIS is thinking...
+                      <span role="img" aria-label="thinking">🤖</span> {THINKING_SENTENCES[thinkingSentenceIndex]}
                     </div>
                   </div>
                 )}
