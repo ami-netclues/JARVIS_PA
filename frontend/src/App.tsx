@@ -46,6 +46,9 @@ const App: React.FC = () => {
   const [isThinking, setIsThinking] = useState(false);
   const [textInput, setTextInput] = useState("");
   const [thinkingSentenceIndex, setThinkingSentenceIndex] = useState(0);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+
+  const isFirefox = useMemo(() => navigator.userAgent.toLowerCase().indexOf('firefox') > -1, []);
 
   const pendingTextMessageRef = useRef<string | null>(null);
   const textTimeoutRef = useRef<any>(null);
@@ -162,7 +165,7 @@ const App: React.FC = () => {
     const SpeechRecognitionImpl =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-    if (SpeechRecognitionImpl) {
+    if (SpeechRecognitionImpl && !isFirefox) {
       const rec: SpeechRecognition = new SpeechRecognitionImpl();
       rec.lang = "en-US";
       rec.continuous = false;
@@ -362,6 +365,26 @@ const App: React.FC = () => {
     }
   };
 
+  const transcribeWithBackend = async (blob: Blob): Promise<string> => {
+    setIsTranscribing(true);
+    setStatus("Transcribing audio...");
+    try {
+      const formData = new FormData();
+      formData.append("file", blob, "audio.webm");
+      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/transcribe`, {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+      return data.text || "";
+    } catch (e) {
+      console.error("[DEBUG] Transcription error:", e);
+      return "";
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
+
   const stopRecording = async () => {
     console.log("[DEBUG] Stopping recording...");
     console.log("[DEBUG] Media recorder state:", mediaRecorderRef.current?.state);
@@ -384,7 +407,7 @@ const App: React.FC = () => {
     setIsRecording(false);
     isRecordingRef.current = false;
 
-    if (recognitionRef.current) {
+    if (recognitionRef.current && !isFirefox) {
       try {
         recognitionRef.current.stop();
       } catch {
@@ -522,12 +545,17 @@ const App: React.FC = () => {
 
   const processAudioAndSend = async () => {
     let text = recognizedTextRef.current.trim();
+    if (isFirefox) {
+      const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+      text = await transcribeWithBackend(blob);
+    }
 
     if (!text) {
       if (userSpokeRef.current) {
         setError("No speech recognized. Please try again.");
       }
       setStatus("Idle");
+      setIsThinking(false);
       return;
     }
 
@@ -1166,7 +1194,7 @@ const App: React.FC = () => {
                     : "0 12px 28px rgba(34,197,94,0.25)",
                 }}
               >
-                {isRecording ? "Stop recording" : "Start recording"}
+                {isTranscribing ? "Transcribing..." : isRecording ? "Stop recording" : "Start recording"}
               </button>
 
               <label

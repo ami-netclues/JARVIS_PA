@@ -193,8 +193,9 @@ async def transcribe(file: UploadFile = File(...)) -> dict[str, str]:
     # - persistent model instance (global) + worker processes
     # - file size limits
     # - authentication / rate limiting
+    import io
     model = WhisperModel("base", device="cpu", compute_type="int8")
-    segments, info = model.transcribe(audio_bytes, language="en")
+    segments, info = model.transcribe(io.BytesIO(audio_bytes), language="en")
     _ = info
 
     text = " ".join(seg.text.strip() for seg in segments).strip()
