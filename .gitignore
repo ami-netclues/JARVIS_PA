@@ -4,3 +4,5 @@
 /frontend/dist
 backend/app.log
 frontend/dist/index.html
+frontend/.env
+/frontend/dist
